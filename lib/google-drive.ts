@@ -110,6 +110,24 @@ export function extractFolderId(input: string): string {
   return trimmed;
 }
 
+/**
+ * Accepts a raw file ID or a full Drive file share URL (e.g.
+ * `.../file/d/ID/view?usp=sharing` or `...?id=ID`) and returns the ID.
+ * Lets a user run the pipeline against a specific video by pasting its
+ * share link directly, without it needing to be listed via the connected
+ * folder first. Access is still governed entirely by the connected
+ * account's Drive permissions -- pasting a link to a file that account
+ * can't see will simply fail when the API call is made.
+ */
+export function extractFileId(input: string): string {
+  const trimmed = input.trim();
+  const fileMatch = trimmed.match(/\/file\/d\/([a-zA-Z0-9_-]+)/);
+  if (fileMatch) return fileMatch[1];
+  const idParamMatch = trimmed.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+  if (idParamMatch) return idParamMatch[1];
+  return trimmed;
+}
+
 export async function verifyFolderAccess(
   drive: drive_v3.Drive,
   folderId: string

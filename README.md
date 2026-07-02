@@ -10,10 +10,10 @@ the spine.
 ## Pipeline
 
 1. **Connect** — one-time Google OAuth (read-only Drive scope) + pick a folder.
-2. **Detect** — lists `.mp4` / `.mov` files in that folder.
+2. **Detect** — lists `.mp4` / `.mov` files in that folder. You can also skip browsing entirely and paste a share link (or raw file ID) for any specific video the connected account can see, in or out of that folder.
 3. **Transcribe** — downloads the file, extracts audio with ffmpeg, transcribes with Whisper via Groq's free-tier hosted API (segment-level timestamps, auto-chunked for long footage).
-4. **Narrative** — sends the timestamped transcript to an LLM with an ABH brand-voice system prompt; returns a structured long-form narrative with timestamp citations, via forced tool-use (not free-text JSON parsing). Defaults to a free Groq-hosted Llama model; switchable to Claude via one env var (see Setup).
-5. **Short-form** — a second LLM call flags self-contained 15-60s moments (hook in the first 2 seconds, single idea, clear payoff), validated/clamped against real transcript timestamps server-side.
+4. **Narrative** — sends the timestamped transcript to an LLM with an ABH brand-voice system prompt, plus an optional producer **brief** (freeform context/angle) and an optional **target video length** (guides section count/pacing, not enforced exactly); returns a structured long-form narrative with timestamp citations, via forced tool-use (not free-text JSON parsing). Defaults to a free Groq-hosted Llama model; switchable to Claude via one env var (see Setup).
+5. **Short-form** — a second LLM call flags self-contained 15-60s moments (hook in the first 2 seconds, single idea, clear payoff), also informed by the brief if provided, validated/clamped against real transcript timestamps server-side.
 6. **Export** — builds a frame-accurate `.fcpxml` (asset + one asset-clip per flagged moment, back to back on the spine, with markers) and a `.docx` (narrative outline + short-form picks table).
 7. **Output** — both files are streamed to the browser as direct downloads; nothing is persisted server-side.
 

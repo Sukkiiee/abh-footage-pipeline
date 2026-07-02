@@ -7,6 +7,8 @@ import {
   requireDrive,
   getFileMetadata,
   downloadFileToPath,
+  extractFileId,
+  VIDEO_MIME_TYPES,
   NotConnectedError,
 } from '@/lib/google-drive';
 import { probeVideo, extractAudio, chunkAudioIfNeeded } from '@/lib/media';
@@ -35,17 +37,40 @@ function sanitizeFileName(name: string): string {
 export async function POST(req: NextRequest) {
   let fileId = '';
   let localMediaPath: string | undefined;
+  let brief: string | undefined;
+  let targetLengthMinutes: number | undefined;
 
   try {
     const body = await req.json();
-    fileId = String(body.fileId || '');
+
+    // Either a fileId (from the connected-folder file list) or a pasted
+    // Drive share link for a specific video works here -- access is
+    // governed entirely by what the connected Drive account can see, not
+    // by which folder the file happens to live in.
+    if (body.fileId) {
+      fileId = String(body.fileId);
+    } else if (body.driveLink) {
+      fileId = extractFileId(String(body.driveLink));
+    }
+
     localMediaPath = body.localMediaPath ? String(body.localMediaPath) : undefined;
+    brief = body.brief ? String(body.brief) : undefined;
+
+    if (body.targetLengthMinutes !== undefined && body.targetLengthMinutes !== null && body.targetLengthMinutes !== '') {
+      const parsed = Number(body.targetLengthMinutes);
+      if (Number.isFinite(parsed) && parsed > 0) {
+        targetLengthMinutes = parsed;
+      }
+    }
   } catch {
     return NextResponse.json({ error: 'Invalid JSON body.' }, { status: 400 });
   }
 
   if (!fileId) {
-    return NextResponse.json({ error: 'fileId is required.' }, { status: 400 });
+    return NextResponse.json(
+      { error: 'Provide a fileId or a Drive video link.' },
+      { status: 400 }
+    );
   }
 
   let authCtx;
@@ -75,6 +100,12 @@ export async function POST(req: NextRequest) {
         percent: 2,
       });
       const fileMeta = await getFileMetadata(drive, fileId);
+
+      if (!VIDEO_MIME_TYPES.includes(fileMeta.mimeType)) {
+        throw new Error(
+          `"${fileMeta.name}" isn't an .mp4/.mov file (got ${fileMeta.mimeType || 'unknown type'}). Check the link points to the right file.`
+        );
+      }
 
       if (fileMeta.size && Number(fileMeta.size) > MAX_SOURCE_BYTES) {
         throw new Error(
@@ -126,17 +157,22 @@ export async function POST(req: NextRequest) {
 
       sse.send('progress', {
         stage: 'narrative',
-        message: 'Generating long-form narrative with Claude (ABH brand voice)...',
+        message: 'Generating long-form narrative (ABH brand voice)...',
         percent: 60,
       });
-      const narrative = await generateNarrative(transcript, fileMeta.name);
+      const narrative = await generateNarrative(transcript, fileMeta.name, {
+        brief,
+        targetLengthMinutes,
+      });
 
       sse.send('progress', {
         stage: 'shortform',
         message: 'Flagging self-contained short-form moments...',
         percent: 75,
       });
-      const { clips, rejected } = await extractShortFormClips(transcript, fileMeta.name);
+      const { clips, rejected } = await extractShortFormClips(transcript, fileMeta.name, {
+        brief,
+      });
 
       sse.send('progress', {
         stage: 'export',

@@ -65,16 +65,32 @@ const NARRATIVE_TOOL = {
   },
 };
 
+export interface NarrativeOptions {
+  /** Free-text producer/editorial brief -- context, angle, or instructions for this specific piece. */
+  brief?: string;
+  /** Target runtime of the final edited video, in minutes. Guides pacing/section count, not enforced exactly. */
+  targetLengthMinutes?: number;
+}
+
 export async function generateNarrative(
   transcript: Transcript,
-  sourceFileName: string
+  sourceFileName: string,
+  options: NarrativeOptions = {}
 ): Promise<NarrativeResult> {
   const transcriptText = transcriptToPromptText(transcript);
   const totalDuration = formatTimestamp(transcript.durationSec);
 
+  const briefBlock = options.brief?.trim()
+    ? `\nProducer brief for this piece:\n${options.brief.trim()}\n\nFollow this brief for angle, emphasis, and framing wherever it doesn't conflict with what's actually present in the transcript. Do not invent content the brief implies but the transcript doesn't support.\n`
+    : '';
+
+  const targetLengthBlock = options.targetLengthMinutes && options.targetLengthMinutes > 0
+    ? `\nTarget runtime for the final edited video: approximately ${options.targetLengthMinutes} minute${options.targetLengthMinutes === 1 ? '' : 's'}. Size and pace the sections/beats so the narrative naturally fits that runtime once cut together: fewer, more tightly-focused sections for a short target, more sections and room to breathe for a longer one. Do not pad to fill time or force a longer piece down to hit a short one at the cost of clarity.\n`
+    : '';
+
   const userPrompt = `Source footage: "${sourceFileName}"
 Total duration: ${totalDuration}
-
+${briefBlock}${targetLengthBlock}
 Below is the full timestamped transcript of the raw footage. Each line is [start - end] followed by what was said.
 
 ---TRANSCRIPT START---

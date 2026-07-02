@@ -94,16 +94,26 @@ function snapToSegmentBoundaries(
   return { start: snappedStart, end: snappedEnd };
 }
 
+export interface ShortFormOptions {
+  /** Free-text producer/editorial brief -- context, angle, or instructions for this specific piece. */
+  brief?: string;
+}
+
 export async function extractShortFormClips(
   transcript: Transcript,
-  sourceFileName: string
+  sourceFileName: string,
+  options: ShortFormOptions = {}
 ): Promise<{ clips: ShortFormClip[]; rejected: number }> {
   const transcriptText = transcriptToPromptText(transcript);
   const totalDuration = formatTimestamp(transcript.durationSec);
 
+  const briefBlock = options.brief?.trim()
+    ? `\nProducer brief for this piece:\n${options.brief.trim()}\n\nLet this brief inform which moments are worth flagging (e.g. what the piece is really about, who the audience is), but every clip you flag must still stand on its own per the requirements below.\n`
+    : '';
+
   const userPrompt = `Source footage: "${sourceFileName}"
 Total duration: ${totalDuration}
-
+${briefBlock}
 Below is the full timestamped transcript of the raw footage.
 
 ---TRANSCRIPT START---

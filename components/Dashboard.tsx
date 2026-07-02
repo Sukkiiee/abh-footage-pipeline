@@ -74,8 +74,12 @@ export default function Dashboard() {
   const [files, setFiles] = useState<DriveVideoFile[] | null>(null);
   const [processedMap, setProcessedMap] = useState<Record<string, string>>({});
   const [localMediaPath, setLocalMediaPath] = useState('');
+  const [brief, setBrief] = useState('');
+  const [targetLengthMinutes, setTargetLengthMinutes] = useState('');
+  const [driveLinkInput, setDriveLinkInput] = useState('');
 
   const [runningFileId, setRunningFileId] = useState<string | null>(null);
+  const [runningLabel, setRunningLabel] = useState('');
   const [progressLog, setProgressLog] = useState<PipelineProgressEvent[]>([]);
   const [percent, setPercent] = useState(0);
   const [result, setResult] = useState<PipelineDone | null>(null);
@@ -138,20 +142,29 @@ export default function Dashboard() {
     setFiles(null);
   }
 
-  async function runPipeline(file: DriveVideoFile) {
+  async function runPipeline(target: { fileId?: string; driveLink?: string; displayName: string }) {
     setError(null);
     setResult(null);
     setProgressLog([]);
     setPercent(0);
-    setRunningFileId(file.id);
+    setRunningLabel(target.displayName);
+    setRunningFileId(target.fileId || 'link');
+
+    const parsedTargetLength = targetLengthMinutes ? Number(targetLengthMinutes) : undefined;
 
     try {
       const res = await fetch('/api/pipeline/run', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          fileId: file.id,
+          fileId: target.fileId,
+          driveLink: target.driveLink,
           localMediaPath: localMediaPath || undefined,
+          brief: brief || undefined,
+          targetLengthMinutes:
+            parsedTargetLength && Number.isFinite(parsedTargetLength) && parsedTargetLength > 0
+              ? parsedTargetLength
+              : undefined,
         }),
       });
 
@@ -191,8 +204,10 @@ export default function Dashboard() {
           } else if (eventName === 'done') {
             setResult(data as PipelineDone);
             setPercent(100);
-            markProcessed(file.id);
-            setProcessedMap(loadProcessedMap());
+            if (target.fileId) {
+              markProcessed(target.fileId);
+              setProcessedMap(loadProcessedMap());
+            }
           } else if (eventName === 'error') {
             setError(data.message || 'Pipeline failed.');
           }
@@ -203,6 +218,12 @@ export default function Dashboard() {
     } finally {
       setRunningFileId(null);
     }
+  }
+
+  function runFromLink(e: React.FormEvent) {
+    e.preventDefault();
+    if (!driveLinkInput.trim()) return;
+    runPipeline({ driveLink: driveLinkInput.trim(), displayName: 'video from pasted link' });
   }
 
   if (status === null) {
@@ -265,18 +286,80 @@ export default function Dashboard() {
           </div>
 
           <div className="card">
-            <h2>Local media path for FCPXML (optional)</h2>
-            <p className="muted">
-              The generated .fcpxml references the original source file by path so Final Cut Pro
-              can conform it. If left blank it defaults to a placeholder path; Final Cut will
-              prompt to relink to the real file location on the editor&apos;s machine either way.
+            <h2>Run options (optional, apply to any run below)</h2>
+
+            <span className="field-label">Brief for this piece</span>
+            <textarea
+              placeholder="e.g. This is Amara's semifinal pitch round. Focus on the founder's origin story and the trust problem she solved, not the numbers slide."
+              value={brief}
+              onChange={(e) => setBrief(e.target.value)}
+              rows={4}
+              style={{
+                width: '100%',
+                padding: '10px 12px',
+                background: 'var(--panel-2)',
+                border: '1px solid var(--border)',
+                borderRadius: 6,
+                color: 'var(--text)',
+                fontSize: 14,
+                marginBottom: 12,
+                fontFamily: 'inherit',
+                resize: 'vertical',
+              }}
+            />
+            <p className="muted" style={{ marginTop: -6 }}>
+              Passed to the narrative and short-form generation as producer context/angle. Leave
+              blank to let the footage speak for itself.
             </p>
+
+            <span className="field-label">Target video length (minutes, optional)</span>
+            <input
+              type="number"
+              min={1}
+              step={1}
+              placeholder="e.g. 3"
+              value={targetLengthMinutes}
+              onChange={(e) => setTargetLengthMinutes(e.target.value)}
+              style={{ maxWidth: 160 }}
+            />
+            <p className="muted" style={{ marginTop: -6 }}>
+              Guides how many narrative sections/beats get built and how tightly they&apos;re
+              paced, so the outline naturally fits roughly this runtime once cut. Doesn&apos;t
+              affect short-form clip length (always 15-60s).
+            </p>
+
+            <span className="field-label">Local media path for FCPXML</span>
             <input
               type="text"
               placeholder="/Users/editor/Movies/ABH_Footage/"
               value={localMediaPath}
               onChange={(e) => setLocalMediaPath(e.target.value)}
             />
+            <p className="muted" style={{ marginTop: -6 }}>
+              The generated .fcpxml references the original source file by path so Final Cut Pro
+              can conform it. If left blank it defaults to a placeholder path; Final Cut will
+              prompt to relink to the real file location on the editor&apos;s machine either way.
+            </p>
+          </div>
+
+          <div className="card">
+            <h2>Run from a Drive link</h2>
+            <p className="muted">
+              Paste a share link (or raw file ID) for a specific .mp4/.mov, and run the pipeline
+              on it directly, whether or not it&apos;s in the connected folder listed below.
+              Access is governed by whatever the connected Drive account can see.
+            </p>
+            <form onSubmit={runFromLink}>
+              <input
+                type="text"
+                placeholder="https://drive.google.com/file/d/.../view"
+                value={driveLinkInput}
+                onChange={(e) => setDriveLinkInput(e.target.value)}
+              />
+              <button type="submit" disabled={runningFileId !== null || !driveLinkInput.trim()}>
+                {runningFileId === 'link' ? 'Running...' : 'Run from link'}
+              </button>
+            </form>
           </div>
 
           <div className="card">
@@ -300,7 +383,10 @@ export default function Dashboard() {
                         {formatBytes(f.size)} {f.createdTime ? `· added ${new Date(f.createdTime).toLocaleString()}` : ''}
                       </span>
                     </div>
-                    <button onClick={() => runPipeline(f)} disabled={runningFileId !== null}>
+                    <button
+                      onClick={() => runPipeline({ fileId: f.id, displayName: f.name })}
+                      disabled={runningFileId !== null}
+                    >
                       {isRunning ? 'Running...' : isProcessed ? 'Re-run' : 'Run pipeline'}
                     </button>
                   </div>
@@ -312,7 +398,7 @@ export default function Dashboard() {
 
       {runningFileId && (
         <div className="card">
-          <h2>Pipeline progress</h2>
+          <h2>Pipeline progress{runningLabel ? `: ${runningLabel}` : ''}</h2>
           <div className="progress-track">
             <div className="progress-fill" style={{ width: `${percent}%` }} />
           </div>
