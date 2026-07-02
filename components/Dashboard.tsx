@@ -21,8 +21,10 @@ interface PipelineDone {
   rejectedClipCount: number;
   docxBase64: string;
   fcpxmlBase64: string;
+  srtBase64: string;
   docxFilename: string;
   fcpxmlFilename: string;
+  srtFilename: string;
 }
 
 const PROCESSED_KEY = 'abh_processed_files';
@@ -74,7 +76,7 @@ export default function Dashboard() {
   const [files, setFiles] = useState<DriveVideoFile[] | null>(null);
   const [processedMap, setProcessedMap] = useState<Record<string, string>>({});
   const [localMediaPath, setLocalMediaPath] = useState('');
-  const [videoTitle, setVideoTitle] = useState('');
+  const [titleHint, setTitleHint] = useState('');
   const [brief, setBrief] = useState('');
   const [targetLengthMinutes, setTargetLengthMinutes] = useState('');
   const [driveLinkInput, setDriveLinkInput] = useState('');
@@ -161,7 +163,7 @@ export default function Dashboard() {
           fileId: target.fileId,
           driveLink: target.driveLink,
           localMediaPath: localMediaPath || undefined,
-          videoTitle: videoTitle || undefined,
+          titleHint: titleHint || undefined,
           brief: brief || undefined,
           targetLengthMinutes:
             parsedTargetLength && Number.isFinite(parsedTargetLength) && parsedTargetLength > 0
@@ -290,18 +292,18 @@ export default function Dashboard() {
           <div className="card">
             <h2>Run options (optional, apply to any run below)</h2>
 
-            <span className="field-label">Video title</span>
+            <span className="field-label">Title direction (optional)</span>
             <input
               type="text"
-              placeholder="e.g. Amara Okafor: The $4,000 First Order"
-              value={videoTitle}
-              onChange={(e) => setVideoTitle(e.target.value)}
+              placeholder="e.g. lean into the founder's mother, or the $4,000 number"
+              value={titleHint}
+              onChange={(e) => setTitleHint(e.target.value)}
             />
             <p className="muted" style={{ marginTop: -6 }}>
-              Used as-is for the long-form narrative&apos;s title (overrides whatever title the
-              model would otherwise pick). Also prefixes the .fcpxml project and clip names, and
-              is used for the output filenames. Short-form clips still get their own individual
-              titles.
+              Keywords or an angle to steer title generation, not a fixed title. The pipeline
+              generates several title options for the long-form video (and for each short-form
+              clip) rather than settling on one; the strongest option is used by default for
+              exports/filenames, and every option is shown below once a run finishes.
             </p>
 
             <span className="field-label">Brief for this piece</span>
@@ -431,6 +433,17 @@ export default function Dashboard() {
           <h2>Result: {result.narrative.title}</h2>
           <p className="muted">{result.narrative.logline}</p>
 
+          {result.narrative.titleOptions && result.narrative.titleOptions.length > 1 && (
+            <p className="muted">
+              Other title options:{' '}
+              {result.narrative.titleOptions.slice(1).map((t, i) => (
+                <span className="citation" key={i}>
+                  {t}
+                </span>
+              ))}
+            </p>
+          )}
+
           <div className="download-row">
             <button
               onClick={() =>
@@ -447,6 +460,9 @@ export default function Dashboard() {
               onClick={() => downloadBase64(result.fcpxmlFilename, result.fcpxmlBase64, 'application/xml')}
             >
               Download .fcpxml
+            </button>
+            <button onClick={() => downloadBase64(result.srtFilename, result.srtBase64, 'application/x-subrip')}>
+              Download .srt
             </button>
           </div>
 
@@ -487,7 +503,17 @@ export default function Dashboard() {
                 {result.clips.map((c, i) => (
                   <tr key={i}>
                     <td>{i + 1}</td>
-                    <td>{c.title}</td>
+                    <td>
+                      {c.title}
+                      {c.titleOptions && c.titleOptions.length > 1 && (
+                        <>
+                          <br />
+                          <span className="muted" style={{ fontSize: 11 }}>
+                            or: {c.titleOptions.slice(1).join(' / ')}
+                          </span>
+                        </>
+                      )}
+                    </td>
                     <td>{c.startTimestamp}</td>
                     <td>{c.endTimestamp}</td>
                     <td>

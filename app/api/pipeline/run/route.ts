@@ -17,6 +17,7 @@ import { generateNarrative } from '@/lib/narrative';
 import { extractShortFormClips } from '@/lib/shortform';
 import { buildFcpxml } from '@/lib/fcpxml';
 import { buildNarrativeDocx } from '@/lib/docx-export';
+import { buildSrt } from '@/lib/srt';
 import { writeSession } from '@/lib/session';
 import { config } from '@/lib/config';
 
@@ -38,7 +39,7 @@ export async function POST(req: NextRequest) {
   let fileId = '';
   let localMediaPath: string | undefined;
   let brief: string | undefined;
-  let videoTitle: string | undefined;
+  let titleHint: string | undefined;
   let targetLengthMinutes: number | undefined;
 
   try {
@@ -56,7 +57,7 @@ export async function POST(req: NextRequest) {
 
     localMediaPath = body.localMediaPath ? String(body.localMediaPath) : undefined;
     brief = body.brief ? String(body.brief) : undefined;
-    videoTitle = body.videoTitle ? String(body.videoTitle) : undefined;
+    titleHint = body.titleHint ? String(body.titleHint) : undefined;
 
     if (body.targetLengthMinutes !== undefined && body.targetLengthMinutes !== null && body.targetLengthMinutes !== '') {
       const parsed = Number(body.targetLengthMinutes);
@@ -165,7 +166,7 @@ export async function POST(req: NextRequest) {
       const narrative = await generateNarrative(transcript, fileMeta.name, {
         brief,
         targetLengthMinutes,
-        videoTitle,
+        titleHint,
       });
 
       sse.send('progress', {
@@ -173,14 +174,16 @@ export async function POST(req: NextRequest) {
         message: 'Flagging self-contained short-form moments...',
         percent: 75,
       });
+      // Pass the model's own top-pick long-form title (not the raw hint) so
+      // clip titles read as part of the same series once one's been chosen.
       const { clips, rejected } = await extractShortFormClips(transcript, fileMeta.name, {
         brief,
-        videoTitle,
+        videoTitle: narrative.title,
       });
 
       sse.send('progress', {
         stage: 'export',
-        message: 'Building .fcpxml and .docx exports...',
+        message: 'Building .fcpxml, .docx, and .srt exports...',
         percent: 88,
       });
 
@@ -192,7 +195,7 @@ export async function POST(req: NextRequest) {
         localMediaPath: mediaPath,
         metadata,
         clips,
-        videoTitle,
+        videoTitle: narrative.title,
       });
 
       const docxBuffer = await buildNarrativeDocx({
@@ -202,10 +205,12 @@ export async function POST(req: NextRequest) {
         generatedAt: new Date(),
       });
 
-      // Prefer the user-supplied title for output filenames when set, since
-      // that's what they'll recognize; fall back to the source filename.
+      const srtString = buildSrt(transcript);
+
+      // Output filenames use the model's chosen (or hinted) top title,
+      // falling back to the source filename.
       const baseName = sanitizeFileName(
-        (videoTitle?.trim() || fileMeta.name.replace(/\.[^/.]+$/, '')).trim()
+        (narrative.title || fileMeta.name.replace(/\.[^/.]+$/, '')).trim()
       );
 
       sse.send('done', {
@@ -215,8 +220,10 @@ export async function POST(req: NextRequest) {
         rejectedClipCount: rejected,
         docxBase64: docxBuffer.toString('base64'),
         fcpxmlBase64: Buffer.from(fcpxmlString, 'utf8').toString('base64'),
+        srtBase64: Buffer.from(srtString, 'utf8').toString('base64'),
         docxFilename: `${baseName} - ABH Narrative.docx`,
         fcpxmlFilename: `${baseName} - Flagged Clips.fcpxml`,
+        srtFilename: `${baseName} - Transcript.srt`,
       });
     } finally {
       fs.rmSync(workDir, { recursive: true, force: true });

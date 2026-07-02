@@ -66,6 +66,19 @@ export async function buildNarrativeDocx(opts: DocxExportOptions): Promise<Buffe
         }),
       ],
     }),
+    ...(narrative.titleOptions && narrative.titleOptions.length > 1
+      ? [
+          new Paragraph({
+            children: [
+              new TextRun({
+                text: `Other title options: ${narrative.titleOptions.slice(1).join(' / ')}`,
+                size: 18,
+                color: '666666',
+              }),
+            ],
+          }),
+        ]
+      : []),
     new Paragraph({
       children: [
         new TextRun({

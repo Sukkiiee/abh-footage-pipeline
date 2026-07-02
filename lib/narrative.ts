@@ -13,9 +13,11 @@ const NARRATIVE_TOOL = {
   schema: {
     type: 'object' as const,
     properties: {
-      title: {
-        type: 'string',
-        description: 'A specific, concrete working title for this footage. Not generic.',
+      titleOptions: {
+        type: 'array',
+        items: { type: 'string' },
+        description:
+          '3-5 distinct, specific, concrete title options for this footage, strongest first. Not generic. Vary the angle between options (e.g. one founder-quote-driven, one stakes-driven, one number/outcome-driven), not just wording of the same idea.',
       },
       logline: {
         type: 'string',
@@ -61,7 +63,7 @@ const NARRATIVE_TOOL = {
         description: 'Optional single closing line for the piece, in ABH voice.',
       },
     },
-    required: ['title', 'logline', 'sections'],
+    required: ['titleOptions', 'logline', 'sections'],
   },
 };
 
@@ -70,8 +72,8 @@ export interface NarrativeOptions {
   brief?: string;
   /** Target runtime of the final edited video, in minutes. Guides pacing/section count, not enforced exactly. */
   targetLengthMinutes?: number;
-  /** User-supplied title. If set, used verbatim as the final title rather than whatever the model would generate. */
-  videoTitle?: string;
+  /** Optional creative direction for the title options (keywords, angle, names to include). Guides the suggestions; does not fix a single title. */
+  titleHint?: string;
 }
 
 export async function generateNarrative(
@@ -90,22 +92,22 @@ export async function generateNarrative(
     ? `\nTarget runtime for the final edited video: approximately ${options.targetLengthMinutes} minute${options.targetLengthMinutes === 1 ? '' : 's'}. Size and pace the sections/beats so the narrative naturally fits that runtime once cut together: fewer, more tightly-focused sections for a short target, more sections and room to breathe for a longer one. Do not pad to fill time or force a longer piece down to hit a short one at the cost of clarity.\n`
     : '';
 
-  const titleBlock = options.videoTitle?.trim()
-    ? `\nThe title for this video has already been set to "${options.videoTitle.trim()}". Write the logline, sections, and closing line to fit that title; do not propose a different one.\n`
+  const titleHintBlock = options.titleHint?.trim()
+    ? `\nProducer's title direction (keywords/angle to lean into, not a fixed title): "${options.titleHint.trim()}". Let this steer the title options, but still propose several distinct options rather than one.\n`
     : '';
 
   const userPrompt = `Source footage: "${sourceFileName}"
 Total duration: ${totalDuration}
-${briefBlock}${targetLengthBlock}${titleBlock}
+${briefBlock}${targetLengthBlock}${titleHintBlock}
 Below is the full timestamped transcript of the raw footage. Each line is [start - end] followed by what was said.
 
 ---TRANSCRIPT START---
 ${transcriptText}
 ---TRANSCRIPT END---
 
-Build a structured long-form narrative for this footage for the ABH editorial and video team. Organize it into a small number of clear narrative sections/beats (typically 3-8) that a video editor could cut to directly, in the best story order. Every section must cite the specific transcript timestamp range(s) it draws from. Do not invent content that is not in the transcript. Use the submit_narrative tool to return your result.`;
+Build a structured long-form narrative for this footage for the ABH editorial and video team. Organize it into a small number of clear narrative sections/beats (typically 3-8) that a video editor could cut to directly, in the best story order. Every section must cite the specific transcript timestamp range(s) it draws from. Do not invent content that is not in the transcript. Propose several distinct title options rather than settling on one. Use the submit_narrative tool to return your result.`;
 
-  const result = (await generateStructuredJSON(
+  const raw = (await generateStructuredJSON(
     ABH_BRAND_VOICE_SYSTEM_PROMPT,
     userPrompt,
     {
@@ -118,14 +120,21 @@ Build a structured long-form narrative for this footage for the ABH editorial an
       groqModel: config.groqNarrativeModel,
       maxTokens: 8000,
     }
-  )) as NarrativeResult;
+  )) as Omit<NarrativeResult, 'title' | 'titleOptions'> & { titleOptions?: unknown };
 
-  // Deterministic override rather than trusting the model to comply with
-  // the instruction above verbatim -- if the user typed a title, that's
-  // the title, full stop.
-  if (options.videoTitle?.trim()) {
-    result.title = options.videoTitle.trim();
+  const titleOptions = Array.isArray(raw.titleOptions)
+    ? raw.titleOptions.map((t) => String(t)).filter((t) => t.trim().length > 0)
+    : [];
+
+  // Safety net for a weaker model that returns an empty/malformed array
+  // despite the schema requiring one.
+  if (titleOptions.length === 0) {
+    titleOptions.push(`${sourceFileName.replace(/\.[^/.]+$/, '')} - ABH Story`);
   }
 
-  return result;
+  return {
+    ...raw,
+    titleOptions,
+    title: titleOptions[0],
+  };
 }

@@ -2,20 +2,20 @@
 
 Turns raw Google Drive footage into an editor-ready package: a long-form
 narrative outline in the ABH (Africa's Business Heroes) brand voice, a
-flagged list of self-contained 15-60s short-form moments, and two files an
-editor can use immediately: a `.docx` writeup and a `.fcpxml` timeline that
+flagged list of self-contained 15-60s short-form moments, and three files an
+editor can use immediately: a `.docx` writeup, a `.fcpxml` timeline that
 opens directly in Final Cut Pro with every flagged clip already laid out on
-the spine.
+the spine, and a `.srt` subtitle file of the full transcript.
 
 ## Pipeline
 
 1. **Connect** — one-time Google OAuth (read-only Drive scope) + pick a folder.
 2. **Detect** — lists `.mp4` / `.mov` files in that folder. You can also skip browsing entirely and paste a share link (or raw file ID) for any specific video the connected account can see, in or out of that folder.
 3. **Transcribe** — downloads the file, extracts audio with ffmpeg, transcribes with Whisper via Groq's free-tier hosted API (segment-level timestamps, auto-chunked for long footage).
-4. **Narrative** — sends the timestamped transcript to an LLM with an ABH brand-voice system prompt, plus an optional producer **brief** (freeform context/angle), an optional **target video length** (guides section count/pacing, not enforced exactly), and an optional **video title** (used verbatim, overriding whatever the model would otherwise pick); returns a structured long-form narrative with timestamp citations, via forced tool-use (not free-text JSON parsing). Defaults to a free Groq-hosted Llama model; switchable to Claude via one env var (see Setup).
-5. **Short-form** — a second LLM call flags self-contained 15-60s moments (hook in the first 2 seconds, single idea, clear payoff, plus its own short punchy title), also informed by the brief and video title if provided, validated/clamped against real transcript timestamps server-side.
-6. **Export** — builds a frame-accurate `.fcpxml` (asset + one asset-clip per flagged moment, back to back on the spine, with markers) and a `.docx` (narrative outline + short-form picks table).
-7. **Output** — both files are streamed to the browser as direct downloads; nothing is persisted server-side.
+4. **Narrative** — sends the timestamped transcript to an LLM with an ABH brand-voice system prompt, plus an optional producer **brief** (freeform context/angle), an optional **target video length** (guides section count/pacing, not enforced exactly), and an optional **title direction** (keywords/angle, not a fixed title). The model proposes several distinct **title options** rather than settling on one; the strongest option is used by default for exports/filenames, and all options are returned for the producer to review. Returns a structured long-form narrative with timestamp citations, via forced tool-use (not free-text JSON parsing). Defaults to a free Groq-hosted Llama model; switchable to Claude via one env var (see Setup).
+5. **Short-form** — a second LLM call flags self-contained 15-60s moments (hook in the first 2 seconds, single idea, clear payoff), each with its own set of title options (same "suggest, don't dictate" pattern as the long-form title), informed by the brief and the chosen long-form title if set, validated/clamped against real transcript timestamps server-side.
+6. **Export** — builds a frame-accurate `.fcpxml` (asset + one asset-clip per flagged moment, back to back on the spine, with markers), a `.docx` (narrative outline + short-form picks table, including the alternate title options considered), and a `.srt` (one caption block per Whisper segment, full transcript with timestamps).
+7. **Output** — all three files are streamed to the browser as direct downloads; nothing is persisted server-side.
 
 Progress streams live to the UI over SSE while the pipeline runs.
 
@@ -117,6 +117,7 @@ lib/
   narrative.ts / shortform.ts     # structured (tool-use) generations, via lib/llm.ts
   fcpxml.ts                       # frame-accurate FCPXML builder
   docx-export.ts                  # docx builder
+  srt.ts                          # SRT subtitle builder
   sse.ts                          # SSE stream helper
   types.ts                        # shared types
 ```

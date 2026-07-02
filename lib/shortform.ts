@@ -24,10 +24,11 @@ const SHORTFORM_TOOL = {
         items: {
           type: 'object',
           properties: {
-            title: {
-              type: 'string',
+            titleOptions: {
+              type: 'array',
+              items: { type: 'string' },
               description:
-                'A short, punchy label for this clip (a few words), distinct from the hook text -- used for file naming and the editor timeline, e.g. "The $4,000 First Order".',
+                '2-4 short, punchy title options for this clip (a few words each), strongest first, distinct from the hook text -- used for file naming and the editor timeline, e.g. "The $4,000 First Order".',
             },
             startTimestamp: {
               type: 'string',
@@ -65,7 +66,7 @@ const SHORTFORM_TOOL = {
               description: 'e.g. ["Instagram Reels", "TikTok", "LinkedIn", "YouTube Shorts"]',
             },
           },
-          required: ['title', 'startTimestamp', 'endTimestamp', 'hook', 'singleIdea', 'payoff', 'rationale'],
+          required: ['titleOptions', 'startTimestamp', 'endTimestamp', 'hook', 'singleIdea', 'payoff', 'rationale'],
         },
       },
     },
@@ -102,7 +103,7 @@ function snapToSegmentBoundaries(
 export interface ShortFormOptions {
   /** Free-text producer/editorial brief -- context, angle, or instructions for this specific piece. */
   brief?: string;
-  /** Overall video title, if the user set one -- passed as context so per-clip titles read as part of the same series. */
+  /** The long-form piece's chosen title (or a producer title hint), if any -- passed as context so per-clip titles read as part of the same series without repeating it outright. */
   videoTitle?: string;
 }
 
@@ -138,7 +139,7 @@ Flag every self-contained moment in this footage that would work as a standalone
 - A clear payoff by the end: a punchline, a turn, a concrete number, a resolution. Not a clip that trails off or ends mid-thought.
 - Fully self-contained: a viewer with zero context on the rest of the footage understands and feels the whole thing.
 
-Use exact timestamps from the transcript above for startTimestamp and endTimestamp. Do not flag overlapping clips. Return as many strong candidates as the footage actually supports; do not force weak ones in just to hit a number. Use the submit_short_form_clips tool to return your result.`;
+Use exact timestamps from the transcript above for startTimestamp and endTimestamp. Do not flag overlapping clips. Return as many strong candidates as the footage actually supports; do not force weak ones in just to hit a number. For each clip, propose several distinct title options rather than settling on one. Use the submit_short_form_clips tool to return your result.`;
 
   const result = await generateStructuredJSON(
     ABH_BRAND_VOICE_SYSTEM_PROMPT,
@@ -186,13 +187,18 @@ Use exact timestamps from the transcript above for startTimestamp and endTimesta
       length > MAX_CLIP_SECONDS ? clampedStart + MAX_CLIP_SECONDS : clampedEnd;
 
     const hook = String(c.hook || '');
-    // Groq's free-tier model occasionally drops an optional-feeling field
-    // despite it being required; fall back to a trimmed hook rather than
-    // rejecting an otherwise-good clip over a missing title.
-    const title = c.title ? String(c.title) : hook.slice(0, 60) || 'Untitled clip';
+    const rawTitleOptions = Array.isArray(c.titleOptions)
+      ? (c.titleOptions as unknown[]).map((t) => String(t)).filter((t) => t.trim().length > 0)
+      : [];
+    // Groq's free-tier model occasionally drops a field despite it being
+    // required; fall back to a trimmed hook rather than rejecting an
+    // otherwise-good clip over missing titles.
+    const titleOptions =
+      rawTitleOptions.length > 0 ? rawTitleOptions : [hook.slice(0, 60) || 'Untitled clip'];
 
     clips.push({
-      title,
+      title: titleOptions[0],
+      titleOptions,
       startSec: clampedStart,
       endSec: finalEnd,
       startTimestamp: formatTimestamp(clampedStart),

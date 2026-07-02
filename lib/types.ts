@@ -59,7 +59,10 @@ export interface NarrativeSection {
 }
 
 export interface NarrativeResult {
+  /** The top-pick title, used for exports/filenames. Always equal to titleOptions[0]. */
   title: string;
+  /** All title candidates the model proposed, strongest first. */
+  titleOptions: string[];
   logline: string;
   themes?: string[];
   sections: NarrativeSection[];
@@ -67,7 +70,10 @@ export interface NarrativeResult {
 }
 
 export interface ShortFormClip {
-  title: string; // short, punchy label for this clip -- used in FCPXML clip names, DOCX table, file naming
+  /** The top-pick title for this clip, used in FCPXML clip names, DOCX table, file naming. Always equal to titleOptions[0]. */
+  title: string;
+  /** All title candidates the model proposed for this clip, strongest first. */
+  titleOptions: string[];
   startSec: number;
   endSec: number;
   startTimestamp: string; // HH:MM:SS
@@ -101,8 +107,10 @@ export interface PipelineDoneEvent {
   clips: ShortFormClip[];
   docxBase64: string;
   fcpxmlBase64: string;
+  srtBase64: string;
   docxFilename: string;
   fcpxmlFilename: string;
+  srtFilename: string;
 }
 
 export interface PipelineErrorEvent {
