@@ -68,4 +68,15 @@ export const config = {
   get defaultLocalMediaDir() {
     return process.env.DEFAULT_LOCAL_MEDIA_DIR || '/Users/Shared/ABH_Footage';
   },
+  // Safety cap on source video size, in GB. This exists because Vercel's
+  // serverless functions have limited /tmp (ephemeral) storage -- check
+  // your plan's current documented limit before raising this for a Vercel
+  // deployment. Running locally via `npm run dev` writes to your real
+  // disk instead, so this is much less of a concern there; default is set
+  // generously for local use.
+  get maxSourceFileGB() {
+    const raw = process.env.MAX_SOURCE_FILE_GB;
+    const parsed = raw ? Number(raw) : NaN;
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 10;
+  },
 };

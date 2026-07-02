@@ -1,6 +1,5 @@
 import { google, drive_v3 } from 'googleapis';
 import { OAuth2Client, Credentials } from 'google-auth-library';
-import fs from 'fs';
 import { NextRequest } from 'next/server';
 import { config } from './config';
 import { GoogleTokens, DriveVideoFile, SessionData } from './types';
@@ -180,6 +179,99 @@ export async function listVideoFiles(
   return files;
 }
 
+async function listSubfolders(
+  drive: drive_v3.Drive,
+  folderId: string
+): Promise<{ id: string; name: string }[]> {
+  const q = `'${folderId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed = false`;
+  const subfolders: { id: string; name: string }[] = [];
+  let pageToken: string | undefined;
+  do {
+    const res = await drive.files.list({
+      q,
+      fields: 'nextPageToken, files(id, name)',
+      pageSize: 100,
+      pageToken,
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true,
+    });
+    for (const f of res.data.files || []) {
+      if (f.id) subfolders.push({ id: f.id, name: f.name || 'Untitled folder' });
+    }
+    pageToken = res.data.nextPageToken || undefined;
+  } while (pageToken);
+  return subfolders;
+}
+
+// Safety caps so a pathological folder tree (deeply nested, or huge) can't
+// make a single "list footage" request run away -- these are generous for
+// any realistic footage-organization structure.
+const RECURSIVE_MAX_FOLDERS = 300;
+const RECURSIVE_MAX_DEPTH = 8;
+const RECURSIVE_MAX_FILES = 1000;
+
+export interface ListVideoFilesResult {
+  files: DriveVideoFile[];
+  /** True if a safety cap was hit before the whole folder tree was walked -- the list may be incomplete. */
+  truncated: boolean;
+}
+
+/**
+ * Walks the connected folder and every subfolder beneath it (breadth-first,
+ * capped by depth/folder-count/file-count), collecting every .mp4/.mov
+ * found anywhere in the tree. Each result's `folderPath` records which
+ * subfolder it came from, relative to the connected root, so the UI can
+ * show where a file actually lives.
+ */
+export async function listVideoFilesRecursive(
+  drive: drive_v3.Drive,
+  rootFolderId: string
+): Promise<ListVideoFilesResult> {
+  const files: DriveVideoFile[] = [];
+  let foldersVisited = 0;
+  let truncated = false;
+
+  const queue: { id: string; path: string; depth: number }[] = [
+    { id: rootFolderId, path: '', depth: 0 },
+  ];
+
+  while (queue.length > 0) {
+    if (files.length >= RECURSIVE_MAX_FILES || foldersVisited >= RECURSIVE_MAX_FOLDERS) {
+      truncated = true;
+      break;
+    }
+
+    const current = queue.shift()!;
+    foldersVisited++;
+
+    const videoFilesHere = await listVideoFiles(drive, current.id);
+    for (const f of videoFilesHere) {
+      files.push({ ...f, folderPath: current.path || undefined });
+      if (files.length >= RECURSIVE_MAX_FILES) {
+        truncated = true;
+        break;
+      }
+    }
+
+    if (truncated || current.depth >= RECURSIVE_MAX_DEPTH) continue;
+
+    const subfolders = await listSubfolders(drive, current.id);
+    for (const sub of subfolders) {
+      if (foldersVisited + queue.length >= RECURSIVE_MAX_FOLDERS) {
+        truncated = true;
+        break;
+      }
+      queue.push({
+        id: sub.id,
+        path: current.path ? `${current.path}/${sub.name}` : sub.name,
+        depth: current.depth + 1,
+      });
+    }
+  }
+
+  return { files, truncated };
+}
+
 export async function getFileMetadata(
   drive: drive_v3.Drive,
   fileId: string
@@ -200,25 +292,24 @@ export async function getFileMetadata(
   };
 }
 
-export async function downloadFileToPath(
-  drive: drive_v3.Drive,
-  fileId: string,
-  destPath: string
-): Promise<void> {
-  const res = await drive.files.get(
-    { fileId, alt: 'media', supportsAllDrives: true },
-    { responseType: 'stream' }
-  );
-
-  await new Promise<void>((resolve, reject) => {
-    const writer = fs.createWriteStream(destPath);
-    res.data
-      .on('end', () => resolve())
-      .on('error', (err: Error) => reject(err))
-      .pipe(writer)
-      .on('finish', () => resolve())
-      .on('error', (err: Error) => reject(err));
-  });
+/**
+ * Builds the direct Drive media URL for a file's raw bytes, for passing
+ * straight to ffmpeg as an HTTP input (with an Authorization header)
+ * instead of downloading the whole file through Node first.
+ *
+ * ffmpeg's own HTTP demuxer supports byte-range requests, so it can seek
+ * within the remote file exactly the way it would a local one -- which
+ * matters because MP4/MOV containers often store their metadata atom
+ * (`moov`) at the end of the file (typical of unprocessed camera footage
+ * that hasn't been "web-optimized"/fast-started). A naive forward-only
+ * download-then-pipe approach would have no way to jump to that trailing
+ * metadata; ffmpeg's range-request seeking handles it transparently. Net
+ * effect: the source video is never written to local/serverless disk at
+ * all, only the small extracted audio track is.
+ */
+export function getDriveMediaUrl(fileId: string): string {
+  const params = new URLSearchParams({ alt: 'media', supportsAllDrives: 'true' });
+  return `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?${params.toString()}`;
 }
 
 export class NotConnectedError extends Error {
@@ -231,6 +322,8 @@ export class NotConnectedError extends Error {
 export interface AuthContext {
   session: SessionData;
   drive: drive_v3.Drive;
+  /** The current (freshly-verified) access token -- needed anywhere that talks to Drive outside the googleapis client, e.g. ffmpeg's HTTP input. */
+  accessToken: string;
   /** Call after finishing all Drive calls; returns updated tokens if googleapis rotated them, so the caller can persist them to the session cookie. */
   finalizeTokens: () => GoogleTokens | null;
 }
@@ -257,6 +350,7 @@ export async function requireDrive(req: NextRequest): Promise<AuthContext> {
   return {
     session,
     drive,
+    accessToken: freshTokens.access_token,
     finalizeTokens: () => getRefreshedTokens() || (proactivelyChanged ? freshTokens : null),
   };
 }

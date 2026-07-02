@@ -27,9 +27,34 @@ for (const bin of [resolvedFfmpegPath, resolvedFfprobePath]) {
 ffmpeg.setFfmpegPath(resolvedFfmpegPath);
 ffmpeg.setFfprobePath(resolvedFfprobePath);
 
-export function probeVideo(videoPath: string): Promise<VideoMetadata> {
+/**
+ * A video source: either a local file path, or a remote HTTP(S) URL with
+ * headers ffmpeg's own HTTP demuxer should send with every request (used
+ * for the Authorization header on a Drive media URL). Passing a URL lets
+ * ffmpeg/ffprobe read (and range-seek) the source directly over the
+ * network -- the file is never written to local/serverless disk.
+ */
+export type VideoSource = string | { url: string; headers: Record<string, string> };
+
+function isRemoteSource(source: VideoSource): source is { url: string; headers: Record<string, string> } {
+  return typeof source !== 'string';
+}
+
+/** ffmpeg's `-headers` flag wants every header CRLF-terminated, concatenated into one string. */
+function formatFfmpegHeaders(headers: Record<string, string>): string {
+  return Object.entries(headers)
+    .map(([k, v]) => `${k}: ${v}\r\n`)
+    .join('');
+}
+
+export function probeVideo(source: VideoSource): Promise<VideoMetadata> {
+  const input = isRemoteSource(source) ? source.url : source;
+  const extraOptions = isRemoteSource(source)
+    ? ['-headers', formatFfmpegHeaders(source.headers)]
+    : undefined;
+
   return new Promise((resolve, reject) => {
-    ffmpeg.ffprobe(videoPath, (err, data) => {
+    const callback = (err: Error | null, data: ffmpeg.FfprobeData) => {
       if (err) return reject(new Error(`ffprobe failed: ${err.message}`));
 
       const videoStream = data.streams.find((s) => s.codec_type === 'video');
@@ -48,7 +73,7 @@ export function probeVideo(videoPath: string): Promise<VideoMetadata> {
       );
 
       resolve({
-        fileName: path.basename(videoPath),
+        fileName: isRemoteSource(source) ? '' : path.basename(source),
         durationSec: Number.isFinite(durationSec) ? durationSec : 0,
         width: videoStream.width || 1920,
         height: videoStream.height || 1080,
@@ -56,17 +81,27 @@ export function probeVideo(videoPath: string): Promise<VideoMetadata> {
         frameRateDen: den,
         hasAudio: !!audioStream,
       });
-    });
+    };
+
+    if (extraOptions) {
+      ffmpeg.ffprobe(input, extraOptions, callback);
+    } else {
+      ffmpeg.ffprobe(input, callback);
+    }
   });
 }
 
 /** Extracts a mono 16kHz mp3 track, small enough for fast upload/transcription. */
 export function extractAudio(
-  videoPath: string,
+  source: VideoSource,
   audioOutPath: string
 ): Promise<void> {
   return new Promise((resolve, reject) => {
-    ffmpeg(videoPath)
+    const command = isRemoteSource(source) ? ffmpeg(source.url) : ffmpeg(source);
+    if (isRemoteSource(source)) {
+      command.inputOptions(['-headers', formatFfmpegHeaders(source.headers)]);
+    }
+    command
       .noVideo()
       .audioCodec('libmp3lame')
       .audioChannels(1)

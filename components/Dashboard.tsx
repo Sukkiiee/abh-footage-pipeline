@@ -74,6 +74,7 @@ export default function Dashboard() {
   const [folderInput, setFolderInput] = useState('');
   const [folderBusy, setFolderBusy] = useState(false);
   const [files, setFiles] = useState<DriveVideoFile[] | null>(null);
+  const [filesTruncated, setFilesTruncated] = useState(false);
   const [processedMap, setProcessedMap] = useState<Record<string, string>>({});
   const [localMediaPath, setLocalMediaPath] = useState('');
   const [titleHint, setTitleHint] = useState('');
@@ -102,6 +103,7 @@ export default function Dashboard() {
     }
     const data = await res.json();
     setFiles(data.files);
+    setFilesTruncated(!!data.truncated);
     setProcessedMap(loadProcessedMap());
   }, []);
 
@@ -382,8 +384,20 @@ export default function Dashboard() {
 
           <div className="card">
             <h2>Step 3 · Footage</h2>
+            <p className="muted">
+              Includes footage in subfolders of the connected folder, not just files at the top
+              level.
+            </p>
+            {filesTruncated && (
+              <p className="muted" style={{ color: 'var(--danger)' }}>
+                This folder tree is large enough that the list below may be incomplete (a safety
+                cap was hit while scanning subfolders). Use a more specific subfolder link, or the
+                &quot;Run from a Drive link&quot; card above for a specific file, if what you need
+                isn&apos;t showing.
+              </p>
+            )}
             {!files && <p className="muted">Loading footage...</p>}
-            {files && files.length === 0 && <p className="muted">No .mp4/.mov files found in this folder.</p>}
+            {files && files.length === 0 && <p className="muted">No .mp4/.mov files found in this folder or its subfolders.</p>}
             {files &&
               files.map((f) => {
                 const isProcessed = !!processedMap[f.id];
@@ -398,6 +412,7 @@ export default function Dashboard() {
                         </span>
                       </span>
                       <span className="file-sub">
+                        {f.folderPath ? `${f.folderPath}/ · ` : ''}
                         {formatBytes(f.size)} {f.createdTime ? `· added ${new Date(f.createdTime).toLocaleString()}` : ''}
                       </span>
                     </div>

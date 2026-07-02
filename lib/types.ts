@@ -22,6 +22,8 @@ export interface DriveVideoFile {
   createdTime?: string;
   modifiedTime?: string;
   webViewLink?: string;
+  /** Path of subfolder names (not including the connected root) this file was found under, if listing was recursive. e.g. "Round 2/Semifinals" */
+  folderPath?: string;
 }
 
 export interface TranscriptSegment {

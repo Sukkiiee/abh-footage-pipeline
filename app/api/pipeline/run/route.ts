@@ -6,7 +6,7 @@ import { createSseStream, SSE_HEADERS } from '@/lib/sse';
 import {
   requireDrive,
   getFileMetadata,
-  downloadFileToPath,
+  getDriveMediaUrl,
   extractFileId,
   VIDEO_MIME_TYPES,
   NotConnectedError,
@@ -28,8 +28,6 @@ import { config } from '@/lib/config';
 // enabled. See README for plan requirements on long footage.
 export const runtime = 'nodejs';
 export const maxDuration = 800;
-
-const MAX_SOURCE_BYTES = 1.8 * 1024 * 1024 * 1024; // conservative /tmp headroom
 
 function sanitizeFileName(name: string): string {
   return name.replace(/[/\\?%*:|"<>]/g, '_');
@@ -87,7 +85,7 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const { drive, session } = authCtx;
+  const { drive, session, accessToken } = authCtx;
   // Resolved once, up front: any refresh_token rotation Google decides to do
   // mid-pipeline (very unlikely inside a token's ~1hr lifetime) won't be
   // persisted, but the proactive refresh that already happened will be.
@@ -110,35 +108,37 @@ export async function POST(req: NextRequest) {
         );
       }
 
-      if (fileMeta.size && Number(fileMeta.size) > MAX_SOURCE_BYTES) {
+      const maxSourceBytes = config.maxSourceFileGB * 1024 * 1024 * 1024;
+      if (fileMeta.size && Number(fileMeta.size) > maxSourceBytes) {
         throw new Error(
-          `Source file is ${(Number(fileMeta.size) / 1e9).toFixed(1)}GB, which is larger than this deployment supports in a single run. Consider a shorter export.`
+          `Source file is ${(Number(fileMeta.size) / 1e9).toFixed(1)}GB, which is over the current MAX_SOURCE_FILE_GB limit (${config.maxSourceFileGB}GB). Raise MAX_SOURCE_FILE_GB in .env.local or use a shorter export.`
         );
       }
 
-      const videoPath = path.join(workDir, sanitizeFileName(fileMeta.name));
-      sse.send('progress', {
-        stage: 'download',
-        message: `Downloading "${fileMeta.name}" from Drive...`,
-        percent: 8,
-      });
-      await downloadFileToPath(drive, fileId, videoPath);
+      // ffmpeg reads directly from Drive over HTTP (with an auth header) --
+      // the source video is never downloaded to local/serverless disk.
+      // ffmpeg's own HTTP client handles the range-request seeking a video
+      // container needs, including files with trailing metadata atoms.
+      const remoteSource = {
+        url: getDriveMediaUrl(fileId),
+        headers: { Authorization: `Bearer ${accessToken}` },
+      };
 
       sse.send('progress', {
         stage: 'probe',
-        message: 'Reading video metadata (duration, frame rate, resolution)...',
-        percent: 20,
+        message: 'Reading video metadata directly from Drive (duration, frame rate, resolution)...',
+        percent: 15,
       });
-      const metadata = await probeVideo(videoPath);
+      const metadata = await probeVideo(remoteSource);
       metadata.fileName = fileMeta.name;
 
       sse.send('progress', {
         stage: 'audio',
-        message: 'Extracting audio track...',
-        percent: 28,
+        message: 'Streaming audio track from Drive (no local video download)...',
+        percent: 30,
       });
       const audioPath = path.join(workDir, 'audio.mp3');
-      await extractAudio(videoPath, audioPath);
+      await extractAudio(remoteSource, audioPath);
 
       sse.send('progress', {
         stage: 'audio',
