@@ -24,6 +24,11 @@ const SHORTFORM_TOOL = {
         items: {
           type: 'object',
           properties: {
+            title: {
+              type: 'string',
+              description:
+                'A short, punchy label for this clip (a few words), distinct from the hook text -- used for file naming and the editor timeline, e.g. "The $4,000 First Order".',
+            },
             startTimestamp: {
               type: 'string',
               description: 'HH:MM:SS, must exactly match a point in the given transcript.',
@@ -60,7 +65,7 @@ const SHORTFORM_TOOL = {
               description: 'e.g. ["Instagram Reels", "TikTok", "LinkedIn", "YouTube Shorts"]',
             },
           },
-          required: ['startTimestamp', 'endTimestamp', 'hook', 'singleIdea', 'payoff', 'rationale'],
+          required: ['title', 'startTimestamp', 'endTimestamp', 'hook', 'singleIdea', 'payoff', 'rationale'],
         },
       },
     },
@@ -97,6 +102,8 @@ function snapToSegmentBoundaries(
 export interface ShortFormOptions {
   /** Free-text producer/editorial brief -- context, angle, or instructions for this specific piece. */
   brief?: string;
+  /** Overall video title, if the user set one -- passed as context so per-clip titles read as part of the same series. */
+  videoTitle?: string;
 }
 
 export async function extractShortFormClips(
@@ -111,9 +118,13 @@ export async function extractShortFormClips(
     ? `\nProducer brief for this piece:\n${options.brief.trim()}\n\nLet this brief inform which moments are worth flagging (e.g. what the piece is really about, who the audience is), but every clip you flag must still stand on its own per the requirements below.\n`
     : '';
 
+  const titleBlock = options.videoTitle?.trim()
+    ? `\nThis footage's video title is "${options.videoTitle.trim()}". Keep each clip's title consistent in tone with it, but each clip title should still describe that specific clip, not repeat the video title.\n`
+    : '';
+
   const userPrompt = `Source footage: "${sourceFileName}"
 Total duration: ${totalDuration}
-${briefBlock}
+${briefBlock}${titleBlock}
 Below is the full timestamped transcript of the raw footage.
 
 ---TRANSCRIPT START---
@@ -174,12 +185,19 @@ Use exact timestamps from the transcript above for startTimestamp and endTimesta
     const finalEnd =
       length > MAX_CLIP_SECONDS ? clampedStart + MAX_CLIP_SECONDS : clampedEnd;
 
+    const hook = String(c.hook || '');
+    // Groq's free-tier model occasionally drops an optional-feeling field
+    // despite it being required; fall back to a trimmed hook rather than
+    // rejecting an otherwise-good clip over a missing title.
+    const title = c.title ? String(c.title) : hook.slice(0, 60) || 'Untitled clip';
+
     clips.push({
+      title,
       startSec: clampedStart,
       endSec: finalEnd,
       startTimestamp: formatTimestamp(clampedStart),
       endTimestamp: formatTimestamp(finalEnd),
-      hook: String(c.hook || ''),
+      hook,
       singleIdea: String(c.singleIdea || ''),
       payoff: String(c.payoff || ''),
       rationale: String(c.rationale || ''),

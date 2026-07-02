@@ -38,6 +38,7 @@ export async function POST(req: NextRequest) {
   let fileId = '';
   let localMediaPath: string | undefined;
   let brief: string | undefined;
+  let videoTitle: string | undefined;
   let targetLengthMinutes: number | undefined;
 
   try {
@@ -55,6 +56,7 @@ export async function POST(req: NextRequest) {
 
     localMediaPath = body.localMediaPath ? String(body.localMediaPath) : undefined;
     brief = body.brief ? String(body.brief) : undefined;
+    videoTitle = body.videoTitle ? String(body.videoTitle) : undefined;
 
     if (body.targetLengthMinutes !== undefined && body.targetLengthMinutes !== null && body.targetLengthMinutes !== '') {
       const parsed = Number(body.targetLengthMinutes);
@@ -163,6 +165,7 @@ export async function POST(req: NextRequest) {
       const narrative = await generateNarrative(transcript, fileMeta.name, {
         brief,
         targetLengthMinutes,
+        videoTitle,
       });
 
       sse.send('progress', {
@@ -172,6 +175,7 @@ export async function POST(req: NextRequest) {
       });
       const { clips, rejected } = await extractShortFormClips(transcript, fileMeta.name, {
         brief,
+        videoTitle,
       });
 
       sse.send('progress', {
@@ -188,6 +192,7 @@ export async function POST(req: NextRequest) {
         localMediaPath: mediaPath,
         metadata,
         clips,
+        videoTitle,
       });
 
       const docxBuffer = await buildNarrativeDocx({
@@ -197,7 +202,11 @@ export async function POST(req: NextRequest) {
         generatedAt: new Date(),
       });
 
-      const baseName = sanitizeFileName(fileMeta.name.replace(/\.[^/.]+$/, ''));
+      // Prefer the user-supplied title for output filenames when set, since
+      // that's what they'll recognize; fall back to the source filename.
+      const baseName = sanitizeFileName(
+        (videoTitle?.trim() || fileMeta.name.replace(/\.[^/.]+$/, '')).trim()
+      );
 
       sse.send('done', {
         sourceFileName: fileMeta.name,

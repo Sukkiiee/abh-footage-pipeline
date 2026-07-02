@@ -70,6 +70,8 @@ export interface NarrativeOptions {
   brief?: string;
   /** Target runtime of the final edited video, in minutes. Guides pacing/section count, not enforced exactly. */
   targetLengthMinutes?: number;
+  /** User-supplied title. If set, used verbatim as the final title rather than whatever the model would generate. */
+  videoTitle?: string;
 }
 
 export async function generateNarrative(
@@ -88,9 +90,13 @@ export async function generateNarrative(
     ? `\nTarget runtime for the final edited video: approximately ${options.targetLengthMinutes} minute${options.targetLengthMinutes === 1 ? '' : 's'}. Size and pace the sections/beats so the narrative naturally fits that runtime once cut together: fewer, more tightly-focused sections for a short target, more sections and room to breathe for a longer one. Do not pad to fill time or force a longer piece down to hit a short one at the cost of clarity.\n`
     : '';
 
+  const titleBlock = options.videoTitle?.trim()
+    ? `\nThe title for this video has already been set to "${options.videoTitle.trim()}". Write the logline, sections, and closing line to fit that title; do not propose a different one.\n`
+    : '';
+
   const userPrompt = `Source footage: "${sourceFileName}"
 Total duration: ${totalDuration}
-${briefBlock}${targetLengthBlock}
+${briefBlock}${targetLengthBlock}${titleBlock}
 Below is the full timestamped transcript of the raw footage. Each line is [start - end] followed by what was said.
 
 ---TRANSCRIPT START---
@@ -99,7 +105,7 @@ ${transcriptText}
 
 Build a structured long-form narrative for this footage for the ABH editorial and video team. Organize it into a small number of clear narrative sections/beats (typically 3-8) that a video editor could cut to directly, in the best story order. Every section must cite the specific transcript timestamp range(s) it draws from. Do not invent content that is not in the transcript. Use the submit_narrative tool to return your result.`;
 
-  const result = await generateStructuredJSON(
+  const result = (await generateStructuredJSON(
     ABH_BRAND_VOICE_SYSTEM_PROMPT,
     userPrompt,
     {
@@ -112,7 +118,14 @@ Build a structured long-form narrative for this footage for the ABH editorial an
       groqModel: config.groqNarrativeModel,
       maxTokens: 8000,
     }
-  );
+  )) as NarrativeResult;
 
-  return result as NarrativeResult;
+  // Deterministic override rather than trusting the model to comply with
+  // the instruction above verbatim -- if the user typed a title, that's
+  // the title, full stop.
+  if (options.videoTitle?.trim()) {
+    result.title = options.videoTitle.trim();
+  }
+
+  return result;
 }

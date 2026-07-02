@@ -62,6 +62,8 @@ export interface FcpxmlOptions {
   metadata: VideoMetadata;
   clips: ShortFormClip[];
   projectName?: string;
+  /** User-supplied overall video title, if set. Used to build the default project name and prefix each clip name. */
+  videoTitle?: string;
 }
 
 /**
@@ -88,7 +90,9 @@ export function buildFcpxml(opts: FcpxmlOptions): string {
   );
   const assetDuration = frameCountToTime(assetDurationFrames, frameDuration);
 
-  const projectName = opts.projectName || `${opts.sourceFileName} - Flagged Short-Form Clips`;
+  const titlePrefix = opts.videoTitle?.trim() ? `${opts.videoTitle.trim()} - ` : '';
+  const projectName =
+    opts.projectName || `${titlePrefix}${opts.sourceFileName} - Flagged Short-Form Clips`;
 
   let offsetFrames = 0;
   const spineItems = clips.map((clip, i) => {
@@ -101,12 +105,14 @@ export function buildFcpxml(opts: FcpxmlOptions): string {
     const offsetTime = frameCountToTime(offsetFrames, frameDuration);
     offsetFrames += durFrames;
 
-    const clipName = xmlEscape(`Clip ${i + 1}: ${truncate(clip.hook, 60)}`);
+    const clipName = xmlEscape(
+      `${titlePrefix}Clip ${i + 1}: ${truncate(clip.title || clip.hook, 60)}`
+    );
     const markerNote = xmlEscape(
-      `Hook: ${truncate(clip.hook, 120)} | Idea: ${truncate(clip.singleIdea, 120)} | Payoff: ${truncate(
-        clip.payoff,
+      `${clip.title} | Hook: ${truncate(clip.hook, 120)} | Idea: ${truncate(
+        clip.singleIdea,
         120
-      )}`
+      )} | Payoff: ${truncate(clip.payoff, 120)}`
     );
 
     return `        <asset-clip ref="${assetId}" offset="${offsetTime}" name="${clipName}" start="${startTime}" duration="${durTime}" format="${formatId}" tcFormat="NDF">

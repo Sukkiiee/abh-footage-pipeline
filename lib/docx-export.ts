@@ -144,6 +144,7 @@ export async function buildNarrativeDocx(opts: DocxExportOptions): Promise<Buffe
       tableHeader: true,
       children: [
         headerCell('#'),
+        headerCell('Title'),
         headerCell('In'),
         headerCell('Out'),
         headerCell('Dur (s)'),
@@ -168,6 +169,7 @@ export async function buildNarrativeDocx(opts: DocxExportOptions): Promise<Buffe
       return new TableRow({
         children: [
           bodyCell(String(i + 1)),
+          bodyCell(clip.title),
           bodyCell(clip.startTimestamp),
           bodyCell(clip.endTimestamp),
           bodyCell(String(duration)),

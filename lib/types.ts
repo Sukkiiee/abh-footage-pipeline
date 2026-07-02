@@ -67,6 +67,7 @@ export interface NarrativeResult {
 }
 
 export interface ShortFormClip {
+  title: string; // short, punchy label for this clip -- used in FCPXML clip names, DOCX table, file naming
   startSec: number;
   endSec: number;
   startTimestamp: string; // HH:MM:SS

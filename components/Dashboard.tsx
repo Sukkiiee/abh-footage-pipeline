@@ -74,6 +74,7 @@ export default function Dashboard() {
   const [files, setFiles] = useState<DriveVideoFile[] | null>(null);
   const [processedMap, setProcessedMap] = useState<Record<string, string>>({});
   const [localMediaPath, setLocalMediaPath] = useState('');
+  const [videoTitle, setVideoTitle] = useState('');
   const [brief, setBrief] = useState('');
   const [targetLengthMinutes, setTargetLengthMinutes] = useState('');
   const [driveLinkInput, setDriveLinkInput] = useState('');
@@ -160,6 +161,7 @@ export default function Dashboard() {
           fileId: target.fileId,
           driveLink: target.driveLink,
           localMediaPath: localMediaPath || undefined,
+          videoTitle: videoTitle || undefined,
           brief: brief || undefined,
           targetLengthMinutes:
             parsedTargetLength && Number.isFinite(parsedTargetLength) && parsedTargetLength > 0
@@ -287,6 +289,20 @@ export default function Dashboard() {
 
           <div className="card">
             <h2>Run options (optional, apply to any run below)</h2>
+
+            <span className="field-label">Video title</span>
+            <input
+              type="text"
+              placeholder="e.g. Amara Okafor: The $4,000 First Order"
+              value={videoTitle}
+              onChange={(e) => setVideoTitle(e.target.value)}
+            />
+            <p className="muted" style={{ marginTop: -6 }}>
+              Used as-is for the long-form narrative&apos;s title (overrides whatever title the
+              model would otherwise pick). Also prefixes the .fcpxml project and clip names, and
+              is used for the output filenames. Short-form clips still get their own individual
+              titles.
+            </p>
 
             <span className="field-label">Brief for this piece</span>
             <textarea
@@ -460,6 +476,7 @@ export default function Dashboard() {
               <thead>
                 <tr>
                   <th>#</th>
+                  <th>Title</th>
                   <th>In</th>
                   <th>Out</th>
                   <th>Hook / Idea / Payoff</th>
@@ -470,6 +487,7 @@ export default function Dashboard() {
                 {result.clips.map((c, i) => (
                   <tr key={i}>
                     <td>{i + 1}</td>
+                    <td>{c.title}</td>
                     <td>{c.startTimestamp}</td>
                     <td>{c.endTimestamp}</td>
                     <td>
