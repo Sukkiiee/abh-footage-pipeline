@@ -86,7 +86,14 @@ export default function Dashboard() {
   const [runningLabel, setRunningLabel] = useState('');
   const [progressLog, setProgressLog] = useState<PipelineProgressEvent[]>([]);
   const [percent, setPercent] = useState(0);
-  const [result, setResult] = useState<PipelineDone | null>(null);
+  const [results, setResults] = useState<PipelineDone[]>([]);
+  const [expandedResult, setExpandedResult] = useState(0);
+  const [batchActive, setBatchActive] = useState(false);
+  const [batchProgress, setBatchProgress] = useState<{ current: number; total: number } | null>(
+    null
+  );
+
+  const isBusy = runningFileId !== null || batchActive;
 
   const refreshStatus = useCallback(async () => {
     const res = await fetch('/api/auth/status');
@@ -149,7 +156,6 @@ export default function Dashboard() {
 
   async function runPipeline(target: { fileId?: string; driveLink?: string; displayName: string }) {
     setError(null);
-    setResult(null);
     setProgressLog([]);
     setPercent(0);
     setRunningLabel(target.displayName);
@@ -208,14 +214,17 @@ export default function Dashboard() {
             setProgressLog((prev) => [...prev, data as PipelineProgressEvent]);
             setPercent((data as PipelineProgressEvent).percent);
           } else if (eventName === 'done') {
-            setResult(data as PipelineDone);
+            setResults((prev) => [data as PipelineDone, ...prev]);
+            setExpandedResult(0);
             setPercent(100);
             if (target.fileId) {
               markProcessed(target.fileId);
               setProcessedMap(loadProcessedMap());
             }
           } else if (eventName === 'error') {
-            setError(data.message || 'Pipeline failed.');
+            setError(
+              `${target.displayName}: ${data.message || 'Pipeline failed.'}`
+            );
           }
         }
       }
@@ -230,6 +239,26 @@ export default function Dashboard() {
     e.preventDefault();
     if (!driveLinkInput.trim()) return;
     runPipeline({ driveLink: driveLinkInput.trim(), displayName: 'video from pasted link' });
+  }
+
+  async function runAllNewFootage() {
+    if (!files) return;
+    const toRun = files.filter((f) => !processedMap[f.id]);
+    if (toRun.length === 0) return;
+
+    setBatchActive(true);
+    try {
+      for (let i = 0; i < toRun.length; i++) {
+        setBatchProgress({ current: i + 1, total: toRun.length });
+        await runPipeline({ fileId: toRun[i].id, displayName: toRun[i].name });
+        // runPipeline surfaces its own failures via the error banner; keep
+        // going through the rest of the queue rather than aborting the
+        // whole batch over one bad file.
+      }
+    } finally {
+      setBatchProgress(null);
+      setBatchActive(false);
+    }
   }
 
   if (status === null) {
@@ -376,17 +405,27 @@ export default function Dashboard() {
                 value={driveLinkInput}
                 onChange={(e) => setDriveLinkInput(e.target.value)}
               />
-              <button type="submit" disabled={runningFileId !== null || !driveLinkInput.trim()}>
+              <button type="submit" disabled={isBusy || !driveLinkInput.trim()}>
                 {runningFileId === 'link' ? 'Running...' : 'Run from link'}
               </button>
             </form>
           </div>
 
           <div className="card">
-            <h2>Step 3 · Footage</h2>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+              <h2 style={{ marginBottom: 0 }}>Step 3 · Footage</h2>
+              {files && files.filter((f) => !processedMap[f.id]).length > 0 && (
+                <button onClick={runAllNewFootage} disabled={isBusy}>
+                  {batchActive && batchProgress
+                    ? `Processing ${batchProgress.current}/${batchProgress.total}...`
+                    : `Run all new footage (${files.filter((f) => !processedMap[f.id]).length})`}
+                </button>
+              )}
+            </div>
             <p className="muted">
               Includes footage in subfolders of the connected folder, not just files at the top
-              level.
+              level. &quot;Run all&quot; processes every unprocessed file below one after another
+              -- each finished video gets its own downloadable results further down the page.
             </p>
             {filesTruncated && (
               <p className="muted" style={{ color: 'var(--danger)' }}>
@@ -418,7 +457,7 @@ export default function Dashboard() {
                     </div>
                     <button
                       onClick={() => runPipeline({ fileId: f.id, displayName: f.name })}
-                      disabled={runningFileId !== null}
+                      disabled={isBusy}
                     >
                       {isRunning ? 'Running...' : isProcessed ? 'Re-run' : 'Run pipeline'}
                     </button>
@@ -431,7 +470,12 @@ export default function Dashboard() {
 
       {runningFileId && (
         <div className="card">
-          <h2>Pipeline progress{runningLabel ? `: ${runningLabel}` : ''}</h2>
+          <h2>
+            {batchProgress
+              ? `Batch ${batchProgress.current}/${batchProgress.total} · `
+              : ''}
+            Pipeline progress{runningLabel ? `: ${runningLabel}` : ''}
+          </h2>
           <div className="progress-track">
             <div className="progress-fill" style={{ width: `${percent}%` }} />
           </div>
@@ -443,109 +487,143 @@ export default function Dashboard() {
         </div>
       )}
 
-      {result && (
+      {results.length > 0 && (
         <div className="card">
-          <h2>Result: {result.narrative.title}</h2>
-          <p className="muted">{result.narrative.logline}</p>
-
-          {result.narrative.titleOptions && result.narrative.titleOptions.length > 1 && (
-            <p className="muted">
-              Other title options:{' '}
-              {result.narrative.titleOptions.slice(1).map((t, i) => (
-                <span className="citation" key={i}>
-                  {t}
-                </span>
-              ))}
-            </p>
-          )}
-
-          <div className="download-row">
-            <button
-              onClick={() =>
-                downloadBase64(
-                  result.docxFilename,
-                  result.docxBase64,
-                  'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-                )
-              }
-            >
-              Download .docx
-            </button>
-            <button
-              onClick={() => downloadBase64(result.fcpxmlFilename, result.fcpxmlBase64, 'application/xml')}
-            >
-              Download .fcpxml
-            </button>
-            <button onClick={() => downloadBase64(result.srtFilename, result.srtBase64, 'application/x-subrip')}>
-              Download .srt
-            </button>
-          </div>
-
-          <h3 style={{ marginTop: 24 }}>Narrative sections</h3>
-          {result.narrative.sections.map((s, i) => (
-            <div className="section-block" key={i}>
-              <h3>{s.heading}</h3>
-              <p>{s.narrative}</p>
-              {s.citations.map((c, j) => (
-                <span className="citation" key={j}>
-                  {c.timestamp}
-                </span>
-              ))}
-            </div>
-          ))}
-
-          <h3 style={{ marginTop: 24 }}>
-            Short-form picks ({result.clips.length})
-            {result.rejectedClipCount > 0 && (
-              <span className="muted"> · {result.rejectedClipCount} candidate(s) filtered out</span>
-            )}
-          </h3>
-          {result.clips.length === 0 ? (
-            <p className="muted">No self-contained 15-60s moments were flagged.</p>
-          ) : (
-            <table className="clips-table">
-              <thead>
-                <tr>
-                  <th>#</th>
-                  <th>Title</th>
-                  <th>In</th>
-                  <th>Out</th>
-                  <th>Hook / Idea / Payoff</th>
-                  <th>Rationale</th>
-                </tr>
-              </thead>
-              <tbody>
-                {result.clips.map((c, i) => (
-                  <tr key={i}>
-                    <td>{i + 1}</td>
-                    <td>
-                      {c.title}
-                      {c.titleOptions && c.titleOptions.length > 1 && (
-                        <>
-                          <br />
-                          <span className="muted" style={{ fontSize: 11 }}>
-                            or: {c.titleOptions.slice(1).join(' / ')}
-                          </span>
-                        </>
-                      )}
-                    </td>
-                    <td>{c.startTimestamp}</td>
-                    <td>{c.endTimestamp}</td>
-                    <td>
-                      <strong>{c.hook}</strong>
-                      <br />
-                      {c.singleIdea}
-                      <br />
-                      <em>{c.payoff}</em>
-                    </td>
-                    <td>{c.rationale}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
+          <h2>Results ({results.length})</h2>
+          <p className="muted">
+            Each finished video gets its own entry here, newest first. Click a title to
+            expand/collapse it.
+          </p>
         </div>
       )}
+
+      {results.map((result, idx) => {
+        const isExpanded = expandedResult === idx;
+        return (
+          <div className="card" key={idx}>
+            <div
+              style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', cursor: 'pointer' }}
+              onClick={() => setExpandedResult(isExpanded ? -1 : idx)}
+            >
+              <h2 style={{ marginBottom: 0 }}>
+                {isExpanded ? '▾' : '▸'} {result.narrative.title}
+              </h2>
+              <span className="muted" style={{ fontSize: 12 }}>
+                {result.sourceFileName}
+              </span>
+            </div>
+
+            {isExpanded && (
+              <>
+                <p className="muted">{result.narrative.logline}</p>
+
+                {result.narrative.titleOptions && result.narrative.titleOptions.length > 1 && (
+                  <p className="muted">
+                    Other title options:{' '}
+                    {result.narrative.titleOptions.slice(1).map((t, i) => (
+                      <span className="citation" key={i}>
+                        {t}
+                      </span>
+                    ))}
+                  </p>
+                )}
+
+                <div className="download-row">
+                  <button
+                    onClick={() =>
+                      downloadBase64(
+                        result.docxFilename,
+                        result.docxBase64,
+                        'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+                      )
+                    }
+                  >
+                    Download .docx
+                  </button>
+                  <button
+                    onClick={() =>
+                      downloadBase64(result.fcpxmlFilename, result.fcpxmlBase64, 'application/xml')
+                    }
+                  >
+                    Download .fcpxml
+                  </button>
+                  <button
+                    onClick={() =>
+                      downloadBase64(result.srtFilename, result.srtBase64, 'application/x-subrip')
+                    }
+                  >
+                    Download .srt
+                  </button>
+                </div>
+
+                <h3 style={{ marginTop: 24 }}>Narrative sections</h3>
+                {result.narrative.sections.map((s, i) => (
+                  <div className="section-block" key={i}>
+                    <h3>{s.heading}</h3>
+                    <p>{s.narrative}</p>
+                    {s.citations.map((c, j) => (
+                      <span className="citation" key={j}>
+                        {c.timestamp}
+                      </span>
+                    ))}
+                  </div>
+                ))}
+
+                <h3 style={{ marginTop: 24 }}>
+                  Short-form picks ({result.clips.length})
+                  {result.rejectedClipCount > 0 && (
+                    <span className="muted"> · {result.rejectedClipCount} candidate(s) filtered out</span>
+                  )}
+                </h3>
+                {result.clips.length === 0 ? (
+                  <p className="muted">No self-contained 15-60s moments were flagged.</p>
+                ) : (
+                  <table className="clips-table">
+                    <thead>
+                      <tr>
+                        <th>#</th>
+                        <th>Title</th>
+                        <th>In</th>
+                        <th>Out</th>
+                        <th>Hook / Idea / Payoff</th>
+                        <th>Rationale</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {result.clips.map((c, i) => (
+                        <tr key={i}>
+                          <td>{i + 1}</td>
+                          <td>
+                            {c.title}
+                            {c.titleOptions && c.titleOptions.length > 1 && (
+                              <>
+                                <br />
+                                <span className="muted" style={{ fontSize: 11 }}>
+                                  or: {c.titleOptions.slice(1).join(' / ')}
+                                </span>
+                              </>
+                            )}
+                          </td>
+                          <td>{c.startTimestamp}</td>
+                          <td>{c.endTimestamp}</td>
+                          <td>
+                            <strong>{c.hook}</strong>
+                            <br />
+                            {c.singleIdea}
+                            <br />
+                            <em>{c.payoff}</em>
+                          </td>
+                          <td>{c.rationale}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </>
+            )}
+          </div>
+        );
+      })}
     </>
   );
 }
