@@ -1,5 +1,5 @@
-import Anthropic from '@anthropic-ai/sdk';
 import { config } from './config';
+import { generateStructuredJSON } from './llm';
 import { ABH_BRAND_VOICE_SYSTEM_PROMPT } from './brand-voice';
 import { Transcript, NarrativeResult } from './types';
 import { transcriptToPromptText, formatTimestamp } from './whisper';
@@ -10,7 +10,7 @@ const NARRATIVE_TOOL = {
   name: NARRATIVE_TOOL_NAME,
   description:
     'Submit the structured long-form video narrative built from the timestamped transcript.',
-  input_schema: {
+  schema: {
     type: 'object' as const,
     properties: {
       title: {
@@ -69,8 +69,6 @@ export async function generateNarrative(
   transcript: Transcript,
   sourceFileName: string
 ): Promise<NarrativeResult> {
-  const client = new Anthropic({ apiKey: config.anthropicApiKey });
-
   const transcriptText = transcriptToPromptText(transcript);
   const totalDuration = formatTimestamp(transcript.durationSec);
 
@@ -85,22 +83,20 @@ ${transcriptText}
 
 Build a structured long-form narrative for this footage for the ABH editorial and video team. Organize it into a small number of clear narrative sections/beats (typically 3-8) that a video editor could cut to directly, in the best story order. Every section must cite the specific transcript timestamp range(s) it draws from. Do not invent content that is not in the transcript. Use the submit_narrative tool to return your result.`;
 
-  const response = await client.messages.create({
-    model: config.anthropicNarrativeModel,
-    max_tokens: 8000,
-    system: ABH_BRAND_VOICE_SYSTEM_PROMPT,
-    tools: [NARRATIVE_TOOL],
-    tool_choice: { type: 'tool', name: NARRATIVE_TOOL_NAME },
-    messages: [{ role: 'user', content: userPrompt }],
-  });
+  const result = await generateStructuredJSON(
+    ABH_BRAND_VOICE_SYSTEM_PROMPT,
+    userPrompt,
+    {
+      name: NARRATIVE_TOOL.name,
+      description: NARRATIVE_TOOL.description,
+      schema: NARRATIVE_TOOL.schema,
+    },
+    {
+      anthropicModel: config.anthropicNarrativeModel,
+      groqModel: config.groqNarrativeModel,
+      maxTokens: 8000,
+    }
+  );
 
-  const toolUse = response.content.find(
-    (block) => block.type === 'tool_use'
-  ) as { type: 'tool_use'; input: unknown } | undefined;
-
-  if (!toolUse) {
-    throw new Error('Claude did not return a structured narrative.');
-  }
-
-  return toolUse.input as NarrativeResult;
+  return result as NarrativeResult;
 }

@@ -28,6 +28,22 @@ export const config = {
   get groqWhisperModel() {
     return process.env.GROQ_WHISPER_MODEL || 'whisper-large-v3-turbo';
   },
+  // Narrative generation + short-form flagging both go through lib/llm.ts,
+  // which picks a provider based on this switch. Defaults to Groq (free
+  // tier, no billing required) so the whole pipeline can be exercised at
+  // zero cost; set LLM_PROVIDER=anthropic (and ANTHROPIC_API_KEY) later to
+  // switch to Claude for production-quality output. No code changes needed
+  // to move between them.
+  get llmProvider(): 'groq' | 'anthropic' {
+    return process.env.LLM_PROVIDER === 'anthropic' ? 'anthropic' : 'groq';
+  },
+  get groqNarrativeModel() {
+    return process.env.GROQ_NARRATIVE_MODEL || 'llama-3.3-70b-versatile';
+  },
+  get groqShortFormModel() {
+    return process.env.GROQ_SHORTFORM_MODEL || 'llama-3.3-70b-versatile';
+  },
+  // Only required when LLM_PROVIDER=anthropic.
   get anthropicApiKey() {
     return required('ANTHROPIC_API_KEY');
   },

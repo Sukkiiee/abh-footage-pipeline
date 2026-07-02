@@ -1,5 +1,5 @@
-import Anthropic from '@anthropic-ai/sdk';
 import { config } from './config';
+import { generateStructuredJSON } from './llm';
 import { ABH_BRAND_VOICE_SYSTEM_PROMPT } from './brand-voice';
 import { Transcript, TranscriptSegment, ShortFormClip } from './types';
 import { transcriptToPromptText, formatTimestamp, parseTimestamp } from './whisper';
@@ -16,7 +16,7 @@ const SHORTFORM_TOOL = {
   name: SHORTFORM_TOOL_NAME,
   description:
     'Submit the flagged self-contained short-form moments found in the transcript, suited for standalone social media clips.',
-  input_schema: {
+  schema: {
     type: 'object' as const,
     properties: {
       clips: {
@@ -98,8 +98,6 @@ export async function extractShortFormClips(
   transcript: Transcript,
   sourceFileName: string
 ): Promise<{ clips: ShortFormClip[]; rejected: number }> {
-  const client = new Anthropic({ apiKey: config.anthropicApiKey });
-
   const transcriptText = transcriptToPromptText(transcript);
   const totalDuration = formatTimestamp(transcript.durationSec);
 
@@ -121,23 +119,22 @@ Flag every self-contained moment in this footage that would work as a standalone
 
 Use exact timestamps from the transcript above for startTimestamp and endTimestamp. Do not flag overlapping clips. Return as many strong candidates as the footage actually supports; do not force weak ones in just to hit a number. Use the submit_short_form_clips tool to return your result.`;
 
-  const response = await client.messages.create({
-    model: config.anthropicShortFormModel,
-    max_tokens: 8000,
-    system: ABH_BRAND_VOICE_SYSTEM_PROMPT,
-    tools: [SHORTFORM_TOOL],
-    tool_choice: { type: 'tool', name: SHORTFORM_TOOL_NAME },
-    messages: [{ role: 'user', content: userPrompt }],
-  });
+  const result = await generateStructuredJSON(
+    ABH_BRAND_VOICE_SYSTEM_PROMPT,
+    userPrompt,
+    {
+      name: SHORTFORM_TOOL.name,
+      description: SHORTFORM_TOOL.description,
+      schema: SHORTFORM_TOOL.schema,
+    },
+    {
+      anthropicModel: config.anthropicShortFormModel,
+      groqModel: config.groqShortFormModel,
+      maxTokens: 8000,
+    }
+  );
 
-  const toolUse = response.content.find((block) => block.type === 'tool_use') as
-    | { type: 'tool_use'; input: unknown }
-    | undefined;
-  if (!toolUse) {
-    throw new Error('Claude did not return structured short-form clips.');
-  }
-
-  const raw = (toolUse.input as { clips: Array<Record<string, unknown>> }).clips || [];
+  const raw = (result as { clips: Array<Record<string, unknown>> }).clips || [];
 
   const clips: ShortFormClip[] = [];
   let rejected = 0;
