@@ -5,6 +5,7 @@ import type {
   DriveVideoFile,
   NarrativeResult,
   ShortFormClip,
+  VideoMetadata,
   PipelineProgressEvent,
 } from '@/lib/types';
 
@@ -18,6 +19,7 @@ interface PipelineDone {
   sourceFileName: string;
   narrative: NarrativeResult;
   clips: ShortFormClip[];
+  metadata?: VideoMetadata;
   rejectedClipCount: number;
   docxBase64: string;
   fcpxmlBase64: string;
@@ -68,6 +70,79 @@ function downloadBase64(filename: string, base64: string, mime: string) {
   URL.revokeObjectURL(url);
 }
 
+function base64ToUtf8(b64: string): string {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new TextDecoder('utf-8').decode(bytes);
+}
+
+function utf8ToBase64(str: string): string {
+  const bytes = new TextEncoder().encode(str);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary);
+}
+
+function parseSrtTime(t: string): number {
+  const m = t.trim().match(/(\d{2}):(\d{2}):(\d{2}),(\d{3})/);
+  if (!m) return 0;
+  const [, hh, mm, ss, ms] = m;
+  return Number(hh) * 3600 + Number(mm) * 60 + Number(ss) + Number(ms) / 1000;
+}
+
+function formatSrtTime(totalSeconds: number): string {
+  const clamped = Math.max(0, totalSeconds);
+  const hh = Math.floor(clamped / 3600);
+  const mm = Math.floor((clamped % 3600) / 60);
+  const ss = Math.floor(clamped % 60);
+  const ms = Math.round((clamped - Math.floor(clamped)) * 1000);
+  const pad = (n: number, len = 2) => String(n).padStart(len, '0');
+  return `${pad(hh)}:${pad(mm)}:${pad(ss)},${pad(ms, 3)}`;
+}
+
+/**
+ * Concatenates several per-video SRT files (already base64-encoded, from
+ * each pipeline run's `done` event) into one continuous transcript, as if
+ * the videos played back to back: every video's captions get shifted by
+ * the running total of the previous videos' durations, with a short header
+ * caption marking where each new source starts. Done entirely client-side
+ * since we already have everything needed from prior "done" events -- no
+ * extra server round trip.
+ */
+function combineSrtToBase64(
+  videos: { sourceFileName: string; srtBase64: string; durationSec?: number }[]
+): string {
+  let index = 1;
+  let offsetSeconds = 0;
+  const chunks: string[] = [];
+
+  for (const video of videos) {
+    chunks.push(
+      `${index}\n${formatSrtTime(offsetSeconds)} --> ${formatSrtTime(offsetSeconds + 2)}\n== ${video.sourceFileName} ==\n`
+    );
+    index++;
+
+    const text = base64ToUtf8(video.srtBase64).trim();
+    if (text) {
+      for (const block of text.split(/\n\n+/)) {
+        const lines = block.split('\n');
+        if (lines.length < 2) continue;
+        const [startStr, endStr] = lines[1].split('-->');
+        const start = parseSrtTime(startStr) + offsetSeconds;
+        const end = parseSrtTime(endStr) + offsetSeconds;
+        const captionText = lines.slice(2).join('\n');
+        chunks.push(`${index}\n${formatSrtTime(start)} --> ${formatSrtTime(end)}\n${captionText}\n`);
+        index++;
+      }
+    }
+
+    offsetSeconds += video.durationSec ?? 0;
+  }
+
+  return utf8ToBase64(chunks.join('\n'));
+}
+
 export default function Dashboard() {
   const [status, setStatus] = useState<AuthStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -76,6 +151,7 @@ export default function Dashboard() {
   const [files, setFiles] = useState<DriveVideoFile[] | null>(null);
   const [filesTruncated, setFilesTruncated] = useState(false);
   const [processedMap, setProcessedMap] = useState<Record<string, string>>({});
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [localMediaPath, setLocalMediaPath] = useState('');
   const [titleHint, setTitleHint] = useState('');
   const [brief, setBrief] = useState('');
@@ -92,8 +168,18 @@ export default function Dashboard() {
   const [batchProgress, setBatchProgress] = useState<{ current: number; total: number } | null>(
     null
   );
+  const [combining, setCombining] = useState(false);
 
-  const isBusy = runningFileId !== null || batchActive;
+  const isBusy = runningFileId !== null || batchActive || combining;
+
+  function toggleSelected(id: string) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
 
   const refreshStatus = useCallback(async () => {
     const res = await fetch('/api/auth/status');
@@ -154,7 +240,10 @@ export default function Dashboard() {
     setFiles(null);
   }
 
-  async function runPipeline(target: { fileId?: string; driveLink?: string; displayName: string }) {
+  async function runPipeline(
+    target: { fileId?: string; driveLink?: string; displayName: string },
+    opts?: { collect?: (data: PipelineDone) => void }
+  ) {
     setError(null);
     setProgressLog([]);
     setPercent(0);
@@ -214,8 +303,12 @@ export default function Dashboard() {
             setProgressLog((prev) => [...prev, data as PipelineProgressEvent]);
             setPercent((data as PipelineProgressEvent).percent);
           } else if (eventName === 'done') {
-            setResults((prev) => [data as PipelineDone, ...prev]);
-            setExpandedResult(0);
+            if (opts?.collect) {
+              opts.collect(data as PipelineDone);
+            } else {
+              setResults((prev) => [data as PipelineDone, ...prev]);
+              setExpandedResult(0);
+            }
             setPercent(100);
             if (target.fileId) {
               markProcessed(target.fileId);
@@ -241,23 +334,91 @@ export default function Dashboard() {
     runPipeline({ driveLink: driveLinkInput.trim(), displayName: 'video from pasted link' });
   }
 
-  async function runAllNewFootage() {
+  async function runSelected() {
     if (!files) return;
-    const toRun = files.filter((f) => !processedMap[f.id]);
+    const toRun = files.filter((f) => selectedIds.has(f.id));
     if (toRun.length === 0) return;
 
     setBatchActive(true);
+    const collected: PipelineDone[] = [];
     try {
       for (let i = 0; i < toRun.length; i++) {
         setBatchProgress({ current: i + 1, total: toRun.length });
-        await runPipeline({ fileId: toRun[i].id, displayName: toRun[i].name });
-        // runPipeline surfaces its own failures via the error banner; keep
-        // going through the rest of the queue rather than aborting the
-        // whole batch over one bad file.
+        await runPipeline(
+          { fileId: toRun[i].id, displayName: toRun[i].name },
+          { collect: (data) => collected.push(data) }
+        );
+        // A per-file failure surfaces via the error banner (runPipeline
+        // already prefixes it with the file name); keep going through the
+        // rest of the selection rather than losing everything already done.
       }
     } finally {
       setBatchProgress(null);
       setBatchActive(false);
+    }
+
+    if (collected.length === 0) {
+      setError('None of the selected files finished successfully, so there is nothing to combine.');
+      return;
+    }
+
+    // Single video selected: no need for a combine round trip, just show it
+    // like any other individual run.
+    if (collected.length === 1) {
+      setResults((prev) => [collected[0], ...prev]);
+      setExpandedResult(0);
+      setSelectedIds(new Set());
+      return;
+    }
+
+    setCombining(true);
+    try {
+      const res = await fetch('/api/pipeline/combine', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          videos: collected.map((c) => ({
+            sourceFileName: c.sourceFileName,
+            narrative: c.narrative,
+            clips: c.clips,
+            metadata: c.metadata,
+          })),
+          localMediaPath: localMediaPath || undefined,
+          titleHint: titleHint || undefined,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setError(data.error || 'Failed to combine the selected videos into one document.');
+        return;
+      }
+
+      const combined: PipelineDone = {
+        sourceFileName: `${collected.length} videos combined`,
+        narrative: data.narrative,
+        clips: data.clips,
+        rejectedClipCount: collected.reduce((sum, c) => sum + c.rejectedClipCount, 0),
+        docxBase64: data.docxBase64,
+        fcpxmlBase64: data.fcpxmlBase64,
+        srtBase64: combineSrtToBase64(
+          collected.map((c) => ({
+            sourceFileName: c.sourceFileName,
+            srtBase64: c.srtBase64,
+            durationSec: c.metadata?.durationSec,
+          }))
+        ),
+        docxFilename: data.docxFilename,
+        fcpxmlFilename: data.fcpxmlFilename,
+        srtFilename: `${data.docxFilename.replace(/ - ABH Narrative\.docx$/, '')} - Combined Transcript.srt`,
+      };
+
+      setResults((prev) => [combined, ...prev]);
+      setExpandedResult(0);
+      setSelectedIds(new Set());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to combine results.');
+    } finally {
+      setCombining(false);
     }
   }
 
@@ -412,21 +573,43 @@ export default function Dashboard() {
           </div>
 
           <div className="card">
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
               <h2 style={{ marginBottom: 0 }}>Step 3 · Footage</h2>
-              {files && files.filter((f) => !processedMap[f.id]).length > 0 && (
-                <button onClick={runAllNewFootage} disabled={isBusy}>
-                  {batchActive && batchProgress
-                    ? `Processing ${batchProgress.current}/${batchProgress.total}...`
-                    : `Run all new footage (${files.filter((f) => !processedMap[f.id]).length})`}
-                </button>
-              )}
+              <button onClick={runSelected} disabled={isBusy || selectedIds.size === 0}>
+                {batchActive && batchProgress
+                  ? `Processing ${batchProgress.current}/${batchProgress.total}...`
+                  : combining
+                  ? 'Combining into one document...'
+                  : `Run selected (${selectedIds.size})`}
+              </button>
             </div>
             <p className="muted">
               Includes footage in subfolders of the connected folder, not just files at the top
-              level. &quot;Run all&quot; processes every unprocessed file below one after another
-              -- each finished video gets its own downloadable results further down the page.
+              level. Check the files you want, then run them together -- if you select more than
+              one, the results combine into a single .docx / .fcpxml / .srt instead of one set
+              per video.
             </p>
+            {files && files.length > 0 && (
+              <div className="download-row" style={{ marginBottom: 8 }}>
+                <button
+                  className="secondary"
+                  onClick={() => setSelectedIds(new Set(files.filter((f) => !processedMap[f.id]).map((f) => f.id)))}
+                  disabled={isBusy}
+                >
+                  Select all new
+                </button>
+                <button
+                  className="secondary"
+                  onClick={() => setSelectedIds(new Set(files.map((f) => f.id)))}
+                  disabled={isBusy}
+                >
+                  Select all
+                </button>
+                <button className="secondary" onClick={() => setSelectedIds(new Set())} disabled={isBusy}>
+                  Clear selection
+                </button>
+              </div>
+            )}
             {filesTruncated && (
               <p className="muted" style={{ color: 'var(--danger)' }}>
                 This folder tree is large enough that the list below may be incomplete (a safety
@@ -442,26 +625,28 @@ export default function Dashboard() {
                 const isProcessed = !!processedMap[f.id];
                 const isRunning = runningFileId === f.id;
                 return (
-                  <div className="file-row" key={f.id}>
+                  <label className="file-row" key={f.id} style={{ cursor: isBusy ? 'default' : 'pointer' }}>
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.has(f.id)}
+                      onChange={() => toggleSelected(f.id)}
+                      disabled={isBusy}
+                      style={{ marginRight: 12 }}
+                    />
                     <div className="file-meta">
                       <span className="file-name">
                         {f.name}
                         <span className={`badge ${isProcessed ? 'processed' : 'new'}`}>
                           {isProcessed ? 'Processed' : 'New'}
                         </span>
+                        {isRunning && <span className="badge new">Processing now</span>}
                       </span>
                       <span className="file-sub">
                         {f.folderPath ? `${f.folderPath}/ · ` : ''}
                         {formatBytes(f.size)} {f.createdTime ? `· added ${new Date(f.createdTime).toLocaleString()}` : ''}
                       </span>
                     </div>
-                    <button
-                      onClick={() => runPipeline({ fileId: f.id, displayName: f.name })}
-                      disabled={isBusy}
-                    >
-                      {isRunning ? 'Running...' : isProcessed ? 'Re-run' : 'Run pipeline'}
-                    </button>
-                  </div>
+                  </label>
                 );
               })}
           </div>

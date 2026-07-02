@@ -107,6 +107,8 @@ export interface PipelineDoneEvent {
   sourceFileName: string;
   narrative: NarrativeResult;
   clips: ShortFormClip[];
+  /** Probed source video metadata -- included so a multi-video batch run can later be combined into one FCPXML (which needs each source's frame rate/resolution) without re-probing. */
+  metadata: VideoMetadata;
   docxBase64: string;
   fcpxmlBase64: string;
   srtBase64: string;

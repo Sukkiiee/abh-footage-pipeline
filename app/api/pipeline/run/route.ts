@@ -217,6 +217,7 @@ export async function POST(req: NextRequest) {
         sourceFileName: fileMeta.name,
         narrative,
         clips,
+        metadata,
         rejectedClipCount: rejected,
         docxBase64: docxBuffer.toString('base64'),
         fcpxmlBase64: Buffer.from(fcpxmlString, 'utf8').toString('base64'),

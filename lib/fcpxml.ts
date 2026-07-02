@@ -145,3 +145,154 @@ ${spineItems.join('\n')}
 </fcpxml>
 `;
 }
+
+export interface CombinedFcpxmlSource {
+  sourceFileName: string;
+  /** Absolute local path (or file:// URI) where the editor's machine will find this source's media. */
+  localMediaPath: string;
+  metadata: VideoMetadata;
+  clips: ShortFormClip[];
+}
+
+export interface CombinedFcpxmlOptions {
+  sources: CombinedFcpxmlSource[];
+  projectName?: string;
+  /** Overall combined-video title, if set. Prefixes clip names. */
+  videoTitle?: string;
+}
+
+/**
+ * Builds one FCPXML timeline spanning multiple source videos: one <asset>
+ * (and its own <format>, since different footage can have different frame
+ * rates/resolutions) per source, with every flagged clip from every source
+ * laid back-to-back on a single spine, in the order the sources were given.
+ *
+ * Each asset-clip's own start/duration stay frame-accurate in that clip's
+ * *native* frame rate (they're trim points within its own source asset).
+ * The running *offset* -- its position on the shared timeline -- is instead
+ * expressed in the first source's frame rate, used as the sequence's overall
+ * timebase; this is the standard way mixed-frame-rate timelines are
+ * conformed in practice, since a single spine can only have one canonical
+ * timebase for clip placement even when the clips themselves come from
+ * differently-rated sources.
+ */
+export function buildCombinedFcpxml(opts: CombinedFcpxmlOptions): string {
+  const { sources } = opts;
+  if (sources.length === 0) {
+    throw new Error('buildCombinedFcpxml requires at least one source video.');
+  }
+
+  const titlePrefix = opts.videoTitle?.trim() ? `${opts.videoTitle.trim()} - ` : '';
+  const projectName =
+    opts.projectName ||
+    `${titlePrefix}Combined Flagged Short-Form Clips (${sources.length} videos)`;
+
+  const canonical = sources[0].metadata;
+  const canonicalFrameDuration = frameDurationFraction(
+    canonical.frameRateNum,
+    canonical.frameRateDen
+  );
+
+  const resourceBlocks: string[] = [];
+  const spineItems: string[] = [];
+  let offsetSeconds = 0;
+  let clipCounter = 0;
+
+  sources.forEach((source, sourceIndex) => {
+    const formatId = `f${sourceIndex + 1}`;
+    const assetId = `a${sourceIndex + 1}`;
+    const frameDuration = frameDurationFraction(
+      source.metadata.frameRateNum,
+      source.metadata.frameRateDen
+    );
+
+    const srcUrl = source.localMediaPath.startsWith('file://')
+      ? source.localMediaPath
+      : `file://${source.localMediaPath}`;
+
+    const assetDurationFrames = secondsToFrames(
+      source.metadata.durationSec,
+      source.metadata.frameRateNum,
+      source.metadata.frameRateDen
+    );
+    const assetDuration = frameCountToTime(assetDurationFrames, frameDuration);
+
+    resourceBlocks.push(
+      `    <format id="${formatId}" name="ABHSourceFormat${sourceIndex + 1}" frameDuration="${frameDuration.num}/${frameDuration.den}s" width="${source.metadata.width}" height="${source.metadata.height}"/>`,
+      `    <asset id="${assetId}" name="${xmlEscape(source.sourceFileName)}" start="0s" duration="${assetDuration}" hasVideo="1" format="${formatId}" hasAudio="${source.metadata.hasAudio ? '1' : '0'}" audioSources="1" audioChannels="2" audioRate="48000">
+      <media-rep kind="original-media" src="${xmlEscape(srcUrl)}"/>
+    </asset>`
+    );
+
+    for (const clip of source.clips) {
+      clipCounter++;
+      const inFrames = secondsToFrames(
+        clip.startSec,
+        source.metadata.frameRateNum,
+        source.metadata.frameRateDen
+      );
+      const outFrames = secondsToFrames(
+        clip.endSec,
+        source.metadata.frameRateNum,
+        source.metadata.frameRateDen
+      );
+      const durFrames = Math.max(1, outFrames - inFrames);
+      const clipDurationSeconds = durFrames * (frameDuration.num / frameDuration.den);
+
+      const startTime = frameCountToTime(inFrames, frameDuration);
+      const durTime = frameCountToTime(durFrames, frameDuration);
+      const offsetFrames = secondsToFrames(
+        offsetSeconds,
+        canonical.frameRateNum,
+        canonical.frameRateDen
+      );
+      const offsetTime = frameCountToTime(offsetFrames, canonicalFrameDuration);
+
+      offsetSeconds += clipDurationSeconds;
+
+      const clipName = xmlEscape(
+        `${titlePrefix}Clip ${clipCounter}: ${truncate(clip.title || clip.hook, 50)} [${source.sourceFileName}]`
+      );
+      const markerNote = xmlEscape(
+        `${clip.title} | Source: ${source.sourceFileName} | Hook: ${truncate(
+          clip.hook,
+          100
+        )} | Idea: ${truncate(clip.singleIdea, 100)} | Payoff: ${truncate(clip.payoff, 100)}`
+      );
+
+      spineItems.push(
+        `        <asset-clip ref="${assetId}" offset="${offsetTime}" name="${clipName}" start="${startTime}" duration="${durTime}" format="${formatId}" tcFormat="NDF">
+          <marker start="${startTime}" duration="${frameCountToTime(1, frameDuration)}" value="${markerNote}"/>
+        </asset-clip>`
+      );
+    }
+  });
+
+  const totalDurationFrames = secondsToFrames(
+    offsetSeconds,
+    canonical.frameRateNum,
+    canonical.frameRateDen
+  );
+  const totalDuration = frameCountToTime(totalDurationFrames, canonicalFrameDuration);
+  const sequenceFormatId = 'f1';
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml>
+<fcpxml version="1.10">
+  <resources>
+${resourceBlocks.join('\n')}
+  </resources>
+  <library>
+    <event name="ABH Flagged Clips (Combined)">
+      <project name="${xmlEscape(projectName)}">
+        <sequence format="${sequenceFormatId}" duration="${totalDuration}" tcStart="0s" tcFormat="NDF">
+          <spine>
+${spineItems.join('\n')}
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>
+`;
+}

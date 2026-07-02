@@ -15,7 +15,7 @@ the spine, and a `.srt` subtitle file of the full transcript.
 4. **Narrative** — sends the timestamped transcript to an LLM with an ABH brand-voice system prompt, plus an optional producer **brief** (freeform context/angle), an optional **target video length** (guides section count/pacing, not enforced exactly), and an optional **title direction** (keywords/angle, not a fixed title). The model proposes several distinct **title options** rather than settling on one; the strongest option is used by default for exports/filenames, and all options are returned for the producer to review. Returns a structured long-form narrative with timestamp citations, via forced tool-use (not free-text JSON parsing). Defaults to a free Groq-hosted Llama model; switchable to Claude via one env var (see Setup).
 5. **Short-form** — a second LLM call flags self-contained 15-60s moments (hook in the first 2 seconds, single idea, clear payoff), each with its own set of title options (same "suggest, don't dictate" pattern as the long-form title), informed by the brief and the chosen long-form title if set, validated/clamped against real transcript timestamps server-side.
 6. **Export** — builds a frame-accurate `.fcpxml` (asset + one asset-clip per flagged moment, back to back on the spine, with markers), a `.docx` (narrative outline + short-form picks table, including the alternate title options considered), and a `.srt` (one caption block per Whisper segment, full transcript with timestamps).
-7. **Output** — all three files are streamed to the browser as direct downloads; nothing is persisted server-side. A **"Run all new footage"** button processes every not-yet-run file in the connected folder (and its subfolders) one after another; each finished video gets its own expandable results entry with its own set of downloads, rather than each run overwriting the last.
+7. **Output** — all files are streamed to the browser as direct downloads; nothing is persisted server-side. Footage is check-box selectable rather than one "Run" button per file: check the videos you want (or use "Select all new" / "Select all"), then **"Run selected"** processes them sequentially. A single selected video behaves as before (its own `.docx`/`.fcpxml`/`.srt`). Selecting more than one **combines all of them into a single document set** instead of one per video: one `.docx` with every video's narrative sections (grouped and labeled by source) plus one combined short-form picks table, one `.fcpxml` timeline with every video as its own asset and every flagged clip from every video laid back-to-back in order (correctly handling source videos with different frame rates), and one `.srt` with each video's captions concatenated back-to-back as if they played consecutively.
 
 Progress streams live to the UI over SSE while the pipeline runs.
 
@@ -103,7 +103,8 @@ app/
     auth/status/route.ts
     drive/folder/route.ts         # set/get connected folder
     drive/files/route.ts          # list .mp4/.mov in the folder
-    pipeline/run/route.ts         # the whole pipeline, streamed over SSE
+    pipeline/run/route.ts         # the whole pipeline for one video, streamed over SSE
+    pipeline/combine/route.ts     # merges several already-run videos' results into one docx/fcpxml
 components/
   Dashboard.tsx                   # all client-side UI + SSE consumption
 lib/
@@ -115,7 +116,7 @@ lib/
   brand-voice.ts                  # ABH system prompt
   llm.ts                          # provider-agnostic structured tool-use call (Groq or Claude)
   narrative.ts / shortform.ts     # structured (tool-use) generations, via lib/llm.ts
-  fcpxml.ts                       # frame-accurate FCPXML builder
+  fcpxml.ts                       # frame-accurate FCPXML builder (single-video and multi-video/combined)
   docx-export.ts                  # docx builder
   srt.ts                          # SRT subtitle builder
   sse.ts                          # SSE stream helper
