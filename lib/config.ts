@@ -19,8 +19,14 @@ export const config = {
       return required('GOOGLE_CLIENT_SECRET');
     },
   },
-  get openaiApiKey() {
-    return required('OPENAI_API_KEY');
+  // Transcription: Groq's hosted Whisper endpoint (OpenAI-compatible API),
+  // used instead of OpenAI's paid Whisper API because Groq has a genuinely
+  // free tier. Get a key at https://console.groq.com/keys.
+  get groqApiKey() {
+    return required('GROQ_API_KEY');
+  },
+  get groqWhisperModel() {
+    return process.env.GROQ_WHISPER_MODEL || 'whisper-large-v3-turbo';
   },
   get anthropicApiKey() {
     return required('ANTHROPIC_API_KEY');

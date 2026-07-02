@@ -11,7 +11,7 @@ the spine.
 
 1. **Connect** — one-time Google OAuth (read-only Drive scope) + pick a folder.
 2. **Detect** — lists `.mp4` / `.mov` files in that folder.
-3. **Transcribe** — downloads the file, extracts audio with ffmpeg, transcribes with OpenAI Whisper (segment-level timestamps, auto-chunked for long footage).
+3. **Transcribe** — downloads the file, extracts audio with ffmpeg, transcribes with Whisper via Groq's free-tier hosted API (segment-level timestamps, auto-chunked for long footage).
 4. **Narrative** — sends the timestamped transcript to Claude with an ABH brand-voice system prompt; returns a structured long-form narrative with timestamp citations, via forced tool-use (not free-text JSON parsing).
 5. **Short-form** — a second Claude call flags self-contained 15-60s moments (hook in the first 2 seconds, single idea, clear payoff), validated/clamped against real transcript timestamps server-side.
 6. **Export** — builds a frame-accurate `.fcpxml` (asset + one asset-clip per flagged moment, back to back on the spine, with markers) and a `.docx` (narrative outline + short-form picks table).
@@ -21,7 +21,7 @@ Progress streams live to the UI over SSE while the pipeline runs.
 
 ## Stack
 
-Next.js 14 (App Router) · googleapis · OpenAI SDK (Whisper) · Anthropic SDK (Claude) · fluent-ffmpeg + ffmpeg-static/ffprobe-static · `docx`. No database: the Google OAuth tokens and connected folder are stored in a single encrypted, httpOnly cookie. Whether a file has already been processed is tracked client-side (`localStorage`) so it survives across sessions in that browser.
+Next.js 14 (App Router) · googleapis · OpenAI SDK pointed at Groq's free-tier Whisper endpoint · Anthropic SDK (Claude) · fluent-ffmpeg + ffmpeg-static/ffprobe-static · `docx`. No database: the Google OAuth tokens and connected folder are stored in a single encrypted, httpOnly cookie. Whether a file has already been processed is tracked client-side (`localStorage`) so it survives across sessions in that browser.
 
 ## Setup
 
@@ -38,7 +38,7 @@ The app requests `drive.readonly`, not the narrower `drive.file` scope. `drive.f
 
 ### 2. API keys
 
-- OpenAI: https://platform.openai.com/api-keys → `OPENAI_API_KEY`
+- Groq (Whisper transcription, free tier): https://console.groq.com/keys → `GROQ_API_KEY`
 - Anthropic: https://console.anthropic.com/ → `ANTHROPIC_API_KEY`
 
 ### 3. Environment
@@ -47,7 +47,7 @@ The app requests `drive.readonly`, not the narrower `drive.file` scope. `drive.f
 cp .env.example .env.local
 ```
 
-Fill in `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, and generate a session secret:
+Fill in `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GROQ_API_KEY`, `ANTHROPIC_API_KEY`, and generate a session secret:
 
 ```bash
 openssl rand -base64 32   # paste as SESSION_SECRET
@@ -82,7 +82,8 @@ Set the same environment variables in the Vercel project settings (Production an
 - **No database, by design.** This is built for a single connected Drive account. Multi-user support, a job history, or server-side "already processed" tracking would need a real datastore (e.g. Vercel Postgres) — a deliberate simplicity trade-off for this version.
 - **Synchronous pipeline.** There's no queue or retry; if it fails partway through (e.g. a Claude API hiccup), you re-run the file from the file list. Nothing is left half-written since outputs are only produced at the very end.
 - **FCPXML media path.** The `.fcpxml` references the source video by a local file path (`src` on the asset), since FCPXML has no concept of "download this from Drive." By default it points at `DEFAULT_LOCAL_MEDIA_DIR` + the original filename; you can override this per-run in the UI. Either way, place the original file at that path on the editing machine before opening the project, or let Final Cut prompt you to relink it, exactly as any other media-offline scenario.
-- **Whisper's 25MB request limit.** Audio is extracted as mono 16kHz mp3 to keep it small; if it's still over ~24MB (very long footage), it's auto-split into 10-minute chunks with `ffmpeg`'s segment muxer and re-stitched with corrected timestamps. Boundary words at chunk edges can occasionally be cut awkwardly; this is a known trade-off, not a bug.
+- **Whisper's request size limit.** Audio is extracted as mono 16kHz mp3 to keep it small; if it's still over ~24MB (very long footage), it's auto-split into 10-minute chunks with `ffmpeg`'s segment muxer and re-stitched with corrected timestamps. Boundary words at chunk edges can occasionally be cut awkwardly; this is a known trade-off, not a bug.
+- **Groq's free tier is rate-limited.** Fine for occasional/personal use; if you're running this against a lot of footage in a short window, you may hit Groq's free-tier request/token-per-minute caps and need to retry, wait, or move to a paid tier. See https://console.groq.com for current limits.
 - **Short-form timestamps are snapped to transcript segment boundaries**, not to the model's raw numbers, so cuts land on clean speech edges. Clips outside 15-60s (beyond a small tolerance) are dropped rather than force-fit.
 - **No em dashes, anywhere.** Enforced in the brand-voice system prompt for both Claude calls.
 
@@ -107,7 +108,7 @@ lib/
   crypto.ts / session.ts          # encrypted session cookie
   google-drive.ts                 # OAuth + Drive API helpers
   media.ts                        # ffmpeg/ffprobe: probe, extract audio, chunk
-  whisper.ts                      # OpenAI transcription + timestamp helpers
+  whisper.ts                      # Groq-hosted Whisper transcription + timestamp helpers
   brand-voice.ts                  # ABH system prompt
   narrative.ts / shortform.ts     # Claude structured (tool-use) generations
   fcpxml.ts                       # frame-accurate FCPXML builder

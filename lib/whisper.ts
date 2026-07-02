@@ -4,8 +4,14 @@ import { config } from './config';
 import { AudioChunk } from './media';
 import { Transcript, TranscriptSegment } from './types';
 
+// Groq hosts open-source Whisper models behind an OpenAI-compatible API, so
+// the official `openai` SDK works unmodified against it -- just point the
+// base URL at Groq and use a Groq API key instead of an OpenAI one.
 function getClient(): OpenAI {
-  return new OpenAI({ apiKey: config.openaiApiKey });
+  return new OpenAI({
+    apiKey: config.groqApiKey,
+    baseURL: 'https://api.groq.com/openai/v1',
+  });
 }
 
 interface WhisperVerboseSegment {
@@ -19,7 +25,7 @@ async function transcribeChunk(filePath: string): Promise<WhisperVerboseSegment[
   const client = getClient();
   const response = await client.audio.transcriptions.create({
     file: fs.createReadStream(filePath),
-    model: 'whisper-1',
+    model: config.groqWhisperModel,
     response_format: 'verbose_json',
     timestamp_granularities: ['segment'],
   });
