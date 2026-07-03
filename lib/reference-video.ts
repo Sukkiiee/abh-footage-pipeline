@@ -35,6 +35,9 @@ function isYouTubeUrl(url: string): boolean {
 const STREAMING_USER_AGENT =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
+const BOM = '﻿';
+const NETSCAPE_HEADER = '# Netscape HTTP Cookie File';
+
 /**
  * Writes YT_DLP_COOKIES_CONTENT (if configured) to a cookies.txt file
  * inside the given directory and returns its path, or undefined if no
@@ -43,11 +46,30 @@ const STREAMING_USER_AGENT =
  * connection, and will outright refuse ("Sign in to confirm you're not a
  * bot") without a real logged-in session's cookies -- this is yt-dlp's own
  * documented fix for that, not something specific to this app.
+ *
+ * yt-dlp requires the very first line to contain "netscape http cookie
+ * file" (case-insensitive) to recognize the format at all. Pasting the
+ * exported file's contents through an env var / a hosting dashboard's text
+ * box is exactly the kind of step that can lose or mangle that first
+ * comment line (a leading BOM, a paste that started from the data rows
+ * instead of the top of the file, etc.) -- normalize defensively rather
+ * than trust it survived copy-paste intact.
  */
 function writeCookiesFileIfConfigured(workDir: string): string | undefined {
   if (!config.ytDlpCookiesContent) return undefined;
+
+  let content = config.ytDlpCookiesContent;
+  if (content.startsWith(BOM)) {
+    content = content.slice(BOM.length);
+  }
+
+  const firstLine = content.split('\n')[0] || '';
+  if (!firstLine.toLowerCase().includes('netscape http cookie file')) {
+    content = `${NETSCAPE_HEADER}\n${content}`;
+  }
+
   const cookiesPath = path.join(workDir, 'cookies.txt');
-  fs.writeFileSync(cookiesPath, config.ytDlpCookiesContent, 'utf8');
+  fs.writeFileSync(cookiesPath, content, 'utf8');
   return cookiesPath;
 }
 
