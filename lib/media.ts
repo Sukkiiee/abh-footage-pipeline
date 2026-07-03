@@ -47,6 +47,21 @@ function formatFfmpegHeaders(headers: Record<string, string>): string {
     .join('');
 }
 
+/** Kills a running ffmpeg command as soon as the given signal aborts, so "Stop" actually cuts the process rather than letting it run to completion. */
+function killOnAbort(command: ffmpeg.FfmpegCommand, signal?: AbortSignal): void {
+  if (!signal) return;
+  if (signal.aborted) {
+    command.kill('SIGKILL');
+    return;
+  }
+  signal.addEventListener('abort', () => command.kill('SIGKILL'), { once: true });
+}
+
+// Note: probing is fast (just reads metadata) and fluent-ffmpeg's static
+// ffprobe() call doesn't expose a handle to kill the underlying process, so
+// it isn't wired to the abort signal the way extractAudio/chunking are --
+// a stop request during this step is picked up at the next checkpoint
+// instead of killing it mid-flight.
 export function probeVideo(source: VideoSource): Promise<VideoMetadata> {
   const input = isRemoteSource(source) ? source.url : source;
   const extraOptions = isRemoteSource(source)
@@ -94,13 +109,15 @@ export function probeVideo(source: VideoSource): Promise<VideoMetadata> {
 /** Extracts a mono 16kHz mp3 track, small enough for fast upload/transcription. */
 export function extractAudio(
   source: VideoSource,
-  audioOutPath: string
+  audioOutPath: string,
+  signal?: AbortSignal
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const command = isRemoteSource(source) ? ffmpeg(source.url) : ffmpeg(source);
     if (isRemoteSource(source)) {
       command.inputOptions(['-headers', formatFfmpegHeaders(source.headers)]);
     }
+    killOnAbort(command, signal);
     command
       .noVideo()
       .audioCodec('libmp3lame')
@@ -130,7 +147,8 @@ export interface AudioChunk {
  */
 export async function chunkAudioIfNeeded(
   audioPath: string,
-  workDir: string
+  workDir: string,
+  signal?: AbortSignal
 ): Promise<AudioChunk[]> {
   const stats = fs.statSync(audioPath);
   if (stats.size <= WHISPER_MAX_BYTES) {
@@ -139,7 +157,9 @@ export async function chunkAudioIfNeeded(
 
   const pattern = path.join(workDir, 'chunk_%03d.mp3');
   await new Promise<void>((resolve, reject) => {
-    ffmpeg(audioPath)
+    const command = ffmpeg(audioPath);
+    killOnAbort(command, signal);
+    command
       .outputOptions([
         '-f segment',
         `-segment_time ${CHUNK_SECONDS}`,

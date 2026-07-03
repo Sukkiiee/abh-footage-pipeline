@@ -91,6 +91,9 @@ Set the same environment variables in the Vercel project settings (Production an
 - **Groq's free tier is rate-limited.** Fine for occasional/personal use; if you're running this against a lot of footage in a short window, you may hit Groq's free-tier request/token-per-minute caps and need to retry, wait, or move to a paid tier. See https://console.groq.com for current limits.
 - **Short-form timestamps are snapped to transcript segment boundaries**, not to the model's raw numbers, so cuts land on clean speech edges. Clips outside 15-60s (beyond a small tolerance) are dropped rather than force-fit.
 - **No em dashes, anywhere.** Enforced in the brand-voice system prompt for both LLM calls, regardless of provider.
+- **Pause/Stop take effect at safe checkpoints, not instantly mid-operation.** You can pause/stop between pipeline stages, and between individual Whisper chunk uploads during transcription (the usual bottleneck for long footage) -- but not, say, half a second into a single ffmpeg audio extraction. Stop does actively kill the running ffmpeg process and abort any in-flight Groq/Claude request rather than just giving up on listening, so it does save real time/cost, just not with zero latency.
+- **Pause/Stop use an in-memory job registry (`lib/job-control.ts`), not a database.** This works reliably locally and on a single serverless instance, since the control request and the running pipeline request share the same process. It is *not* guaranteed if a deployment scales to multiple concurrent serverless instances -- a pause/stop request could land on a different instance than the one running the job and silently no-op. Full production robustness for that case would need a shared store (e.g. Vercel KV) instead of in-memory state.
+- **Time estimates are learned from your own past runs, not a guessed constant.** They're based on a simple bytes-processed-per-second average across runs completed on this machine (stored in `localStorage`), so there's no estimate until at least one run has finished, and accuracy improves as you use it more.
 
 ## Project structure
 
@@ -107,6 +110,7 @@ app/
     drive/files/route.ts          # list .mp4/.mov in the folder
     pipeline/run/route.ts         # the whole pipeline for one video, streamed over SSE
     pipeline/combine/route.ts     # merges several already-run videos' results into one docx/fcpxml
+    pipeline/control/route.ts     # pause/resume/stop a running pipeline by jobId
     reference/parse/route.ts      # extracts text from an uploaded .docx reference document (mammoth)
 components/
   Dashboard.tsx                   # all client-side UI + SSE consumption
@@ -114,7 +118,8 @@ lib/
   config.ts                       # env var access
   crypto.ts / session.ts          # encrypted session cookie
   google-drive.ts                 # OAuth + Drive API helpers
-  media.ts                        # ffmpeg/ffprobe: probe, extract audio, chunk
+  media.ts                        # ffmpeg/ffprobe: probe, extract audio, chunk (abort-aware)
+  job-control.ts                  # in-memory pause/resume/stop registry (see Limitations)
   whisper.ts                      # Groq-hosted Whisper transcription + timestamp helpers
   brand-voice.ts                  # ABH system prompt
   llm.ts                          # provider-agnostic structured tool-use call (Groq or Claude)

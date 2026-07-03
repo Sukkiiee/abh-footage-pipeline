@@ -108,6 +108,8 @@ export interface ShortFormOptions {
   videoTitle?: string;
   /** Other transcripts/scripts uploaded as guides for what a strong short-form soundbite looks like. Never treated as facts about this footage. */
   referenceMaterial?: string;
+  /** Aborts the in-flight LLM request immediately if the pipeline is stopped mid-call. */
+  signal?: AbortSignal;
 }
 
 export async function extractShortFormClips(
@@ -158,6 +160,7 @@ Use exact timestamps from the transcript above for startTimestamp and endTimesta
       anthropicModel: config.anthropicShortFormModel,
       groqModel: config.groqShortFormModel,
       maxTokens: 8000,
+      signal: options.signal,
     }
   );
 

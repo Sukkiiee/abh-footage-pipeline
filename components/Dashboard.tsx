@@ -62,6 +62,56 @@ function formatBytes(size?: string): string {
   return `${mb.toFixed(0)} MB`;
 }
 
+function formatDuration(totalSeconds: number): string {
+  const s = Math.max(0, Math.round(totalSeconds));
+  const mm = Math.floor(s / 60);
+  const ss = s % 60;
+  return `${mm}:${String(ss).padStart(2, '0')}`;
+}
+
+const RUN_HISTORY_KEY = 'abh_run_history';
+const MAX_HISTORY_ENTRIES = 30;
+
+interface RunHistoryEntry {
+  bytes: number;
+  durationSec: number;
+}
+
+function loadRunHistory(): RunHistoryEntry[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    return JSON.parse(window.localStorage.getItem(RUN_HISTORY_KEY) || '[]');
+  } catch {
+    return [];
+  }
+}
+
+function recordRunHistory(bytes: number, durationSec: number) {
+  if (!bytes || !durationSec) return;
+  const history = loadRunHistory();
+  history.push({ bytes, durationSec });
+  window.localStorage.setItem(
+    RUN_HISTORY_KEY,
+    JSON.stringify(history.slice(-MAX_HISTORY_ENTRIES))
+  );
+}
+
+/**
+ * Rough ETA from past real runs on this machine (seconds-per-byte, averaged
+ * across history), not a guessed constant -- returns null until there's at
+ * least one completed run to learn from, since a made-up number would be
+ * worse than no estimate at all.
+ */
+function estimateDurationSeconds(bytes: number): number | null {
+  const history = loadRunHistory();
+  if (history.length === 0 || !bytes) return null;
+  const totalBytes = history.reduce((sum, h) => sum + h.bytes, 0);
+  const totalDuration = history.reduce((sum, h) => sum + h.durationSec, 0);
+  if (totalBytes === 0) return null;
+  const secondsPerByte = totalDuration / totalBytes;
+  return bytes * secondsPerByte;
+}
+
 function downloadBase64(filename: string, base64: string, mime: string) {
   const bytes = atob(base64);
   const buf = new Uint8Array(bytes.length);
@@ -201,6 +251,10 @@ export default function Dashboard() {
     null
   );
   const [combining, setCombining] = useState(false);
+  const [currentJobId, setCurrentJobId] = useState<string | null>(null);
+  const [paused, setPaused] = useState(false);
+  const [controlBusy, setControlBusy] = useState(false);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
 
   const isBusy = runningFileId !== null || batchActive || combining;
 
@@ -244,6 +298,15 @@ export default function Dashboard() {
       refreshFiles();
     }
   }, [status, refreshFiles]);
+
+  // Live elapsed-time clock for the active run. Pauses along with the
+  // pipeline itself, so it reflects actual processing time rather than
+  // wall-clock time spent sitting paused.
+  useEffect(() => {
+    if (!runningFileId || paused) return;
+    const interval = setInterval(() => setElapsedSeconds((s) => s + 1), 1000);
+    return () => clearInterval(interval);
+  }, [runningFileId, paused]);
 
   async function submitFolder(e: React.FormEvent) {
     e.preventDefault();
@@ -323,7 +386,7 @@ export default function Dashboard() {
   }
 
   async function runPipeline(
-    target: { fileId?: string; driveLink?: string; displayName: string },
+    target: { fileId?: string; driveLink?: string; displayName: string; sizeBytes?: number },
     opts?: { collect?: (data: PipelineDone) => void }
   ) {
     setError(null);
@@ -331,6 +394,15 @@ export default function Dashboard() {
     setPercent(0);
     setRunningLabel(target.displayName);
     setRunningFileId(target.fileId || 'link');
+    setPaused(false);
+    setElapsedSeconds(0);
+
+    const jobId =
+      typeof crypto !== 'undefined' && crypto.randomUUID
+        ? crypto.randomUUID()
+        : `job-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    setCurrentJobId(jobId);
+    const runStart = Date.now();
 
     const parsedTargetLength = targetLengthMinutes ? Number(targetLengthMinutes) : undefined;
 
@@ -345,6 +417,7 @@ export default function Dashboard() {
           titleHint: titleHint || undefined,
           brief: brief || undefined,
           referenceMaterial: buildReferenceMaterial(),
+          jobId,
           targetLengthMinutes:
             parsedTargetLength && Number.isFinite(parsedTargetLength) && parsedTargetLength > 0
               ? parsedTargetLength
@@ -397,6 +470,9 @@ export default function Dashboard() {
               markProcessed(target.fileId);
               setProcessedMap(loadProcessedMap());
             }
+            if (target.sizeBytes) {
+              recordRunHistory(target.sizeBytes, (Date.now() - runStart) / 1000);
+            }
           } else if (eventName === 'error') {
             setError(
               `${target.displayName}: ${data.message || 'Pipeline failed.'}`
@@ -408,6 +484,32 @@ export default function Dashboard() {
       setError(err instanceof Error ? err.message : 'Pipeline connection failed.');
     } finally {
       setRunningFileId(null);
+      setCurrentJobId(null);
+      setPaused(false);
+    }
+  }
+
+  async function sendPipelineControl(action: 'pause' | 'resume' | 'stop') {
+    if (!currentJobId) return;
+    setControlBusy(true);
+    try {
+      const res = await fetch('/api/pipeline/control', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jobId: currentJobId, action }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setError(data.error || `Failed to ${action} the pipeline.`);
+        return;
+      }
+      if (action === 'pause') setPaused(true);
+      if (action === 'resume') setPaused(false);
+      // 'stop' leaves paused/runningFileId as-is; the running request will
+      // surface a clean "Pipeline stopped by user." error event shortly,
+      // which resets everything via runPipeline's own finally block.
+    } finally {
+      setControlBusy(false);
     }
   }
 
@@ -428,7 +530,7 @@ export default function Dashboard() {
       for (let i = 0; i < toRun.length; i++) {
         setBatchProgress({ current: i + 1, total: toRun.length });
         await runPipeline(
-          { fileId: toRun[i].id, displayName: toRun[i].name },
+          { fileId: toRun[i].id, displayName: toRun[i].name, sizeBytes: Number(toRun[i].size) || undefined },
           { collect: (data) => collected.push(data) }
         );
         // A per-file failure surfaces via the error banner (runPipeline
@@ -753,6 +855,7 @@ export default function Dashboard() {
               files.map((f) => {
                 const isProcessed = !!processedMap[f.id];
                 const isRunning = runningFileId === f.id;
+                const estimate = f.size ? estimateDurationSeconds(Number(f.size)) : null;
                 return (
                   <label className="file-row" key={f.id} style={{ cursor: isBusy ? 'default' : 'pointer' }}>
                     <input
@@ -773,6 +876,9 @@ export default function Dashboard() {
                       <span className="file-sub">
                         {f.folderPath ? `${f.folderPath}/ · ` : ''}
                         {formatBytes(f.size)} {f.createdTime ? `· added ${new Date(f.createdTime).toLocaleString()}` : ''}
+                        {estimate !== null
+                          ? ` · ~${formatDuration(estimate)} estimated`
+                          : ' · no time estimate yet (based on past runs on this machine)'}
                       </span>
                     </div>
                   </label>
@@ -784,15 +890,37 @@ export default function Dashboard() {
 
       {runningFileId && (
         <div className="card">
-          <h2>
-            {batchProgress
-              ? `Batch ${batchProgress.current}/${batchProgress.total} · `
-              : ''}
-            Pipeline progress{runningLabel ? `: ${runningLabel}` : ''}
-          </h2>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', flexWrap: 'wrap', gap: 8 }}>
+            <h2 style={{ marginBottom: 0 }}>
+              {batchProgress
+                ? `Batch ${batchProgress.current}/${batchProgress.total} · `
+                : ''}
+              Pipeline progress{runningLabel ? `: ${runningLabel}` : ''}
+              {paused ? ' (paused)' : ''}
+            </h2>
+            <span className="muted" style={{ fontSize: 13 }}>
+              Elapsed: {formatDuration(elapsedSeconds)}
+            </span>
+          </div>
           <div className="progress-track">
             <div className="progress-fill" style={{ width: `${percent}%` }} />
           </div>
+          <div className="download-row" style={{ marginBottom: 12 }}>
+            <button
+              className="secondary"
+              onClick={() => sendPipelineControl(paused ? 'resume' : 'pause')}
+              disabled={controlBusy}
+            >
+              {paused ? 'Continue' : 'Pause'}
+            </button>
+            <button className="secondary" onClick={() => sendPipelineControl('stop')} disabled={controlBusy}>
+              Stop
+            </button>
+          </div>
+          <p className="muted" style={{ marginTop: -6, fontSize: 12 }}>
+            Pause/Stop take effect at the next safe point (between pipeline stages, or between
+            Whisper chunks during transcription) -- not necessarily instantly mid-step.
+          </p>
           {progressLog.map((p, i) => (
             <div key={i} className={`log-line ${i === progressLog.length - 1 ? 'current' : ''}`}>
               [{p.stage}] {p.message}

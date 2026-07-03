@@ -19,6 +19,7 @@ export interface GenerateStructuredOptions {
   anthropicModel: string;
   groqModel: string;
   maxTokens?: number;
+  signal?: AbortSignal;
 }
 
 export async function generateStructuredJSON(
@@ -30,9 +31,9 @@ export async function generateStructuredJSON(
   const maxTokens = opts.maxTokens ?? 8000;
 
   if (config.llmProvider === 'anthropic') {
-    return generateViaAnthropic(systemPrompt, userPrompt, tool, opts.anthropicModel, maxTokens);
+    return generateViaAnthropic(systemPrompt, userPrompt, tool, opts.anthropicModel, maxTokens, opts.signal);
   }
-  return generateViaGroq(systemPrompt, userPrompt, tool, opts.groqModel, maxTokens);
+  return generateViaGroq(systemPrompt, userPrompt, tool, opts.groqModel, maxTokens, opts.signal);
 }
 
 async function generateViaAnthropic(
@@ -40,25 +41,29 @@ async function generateViaAnthropic(
   userPrompt: string,
   tool: StructuredToolSpec,
   model: string,
-  maxTokens: number
+  maxTokens: number,
+  signal?: AbortSignal
 ): Promise<unknown> {
   const client = new Anthropic({ apiKey: config.anthropicApiKey });
 
-  const response = await client.messages.create({
-    model,
-    max_tokens: maxTokens,
-    system: systemPrompt,
-    tools: [
-      {
-        name: tool.name,
-        description: tool.description,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        input_schema: tool.schema as any,
-      },
-    ],
-    tool_choice: { type: 'tool', name: tool.name },
-    messages: [{ role: 'user', content: userPrompt }],
-  });
+  const response = await client.messages.create(
+    {
+      model,
+      max_tokens: maxTokens,
+      system: systemPrompt,
+      tools: [
+        {
+          name: tool.name,
+          description: tool.description,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          input_schema: tool.schema as any,
+        },
+      ],
+      tool_choice: { type: 'tool', name: tool.name },
+      messages: [{ role: 'user', content: userPrompt }],
+    },
+    { signal }
+  );
 
   const toolUse = response.content.find((block) => block.type === 'tool_use') as
     | { type: 'tool_use'; input: unknown }
@@ -76,32 +81,36 @@ async function generateViaGroq(
   userPrompt: string,
   tool: StructuredToolSpec,
   model: string,
-  maxTokens: number
+  maxTokens: number,
+  signal?: AbortSignal
 ): Promise<unknown> {
   const client = new OpenAI({
     apiKey: config.groqApiKey,
     baseURL: 'https://api.groq.com/openai/v1',
   });
 
-  const response = await client.chat.completions.create({
-    model,
-    max_tokens: maxTokens,
-    messages: [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: userPrompt },
-    ],
-    tools: [
-      {
-        type: 'function',
-        function: {
-          name: tool.name,
-          description: tool.description,
-          parameters: tool.schema,
+  const response = await client.chat.completions.create(
+    {
+      model,
+      max_tokens: maxTokens,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+      tools: [
+        {
+          type: 'function',
+          function: {
+            name: tool.name,
+            description: tool.description,
+            parameters: tool.schema,
+          },
         },
-      },
-    ],
-    tool_choice: { type: 'function', function: { name: tool.name } },
-  });
+      ],
+      tool_choice: { type: 'function', function: { name: tool.name } },
+    },
+    { signal }
+  );
 
   const toolCall = response.choices[0]?.message?.tool_calls?.[0];
   if (!toolCall || toolCall.type !== 'function') {

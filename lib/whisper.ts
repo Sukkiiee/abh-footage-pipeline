@@ -21,14 +21,20 @@ interface WhisperVerboseSegment {
   text: string;
 }
 
-async function transcribeChunk(filePath: string): Promise<WhisperVerboseSegment[]> {
+async function transcribeChunk(
+  filePath: string,
+  signal?: AbortSignal
+): Promise<WhisperVerboseSegment[]> {
   const client = getClient();
-  const response = await client.audio.transcriptions.create({
-    file: fs.createReadStream(filePath),
-    model: config.groqWhisperModel,
-    response_format: 'verbose_json',
-    timestamp_granularities: ['segment'],
-  });
+  const response = await client.audio.transcriptions.create(
+    {
+      file: fs.createReadStream(filePath),
+      model: config.groqWhisperModel,
+      response_format: 'verbose_json',
+      timestamp_granularities: ['segment'],
+    },
+    { signal }
+  );
 
   // The SDK's base Transcription type doesn't always model the extra fields
   // verbose_json returns, so we read them off defensively.
@@ -54,14 +60,24 @@ async function transcribeChunk(filePath: string): Promise<WhisperVerboseSegment[
  * Transcribes one or more audio chunks (in order) and merges them into a
  * single timestamped transcript, offsetting each chunk's segment times by
  * its position in the original audio.
+ *
+ * `onBeforeChunk` is called before each chunk's request goes out -- the
+ * pipeline route uses it as a pause/stop checkpoint, so a long multi-chunk
+ * transcription (the slowest step for big files) can actually be paused or
+ * stopped between chunks rather than only between whole pipeline stages.
  */
-export async function transcribeChunks(chunks: AudioChunk[]): Promise<Transcript> {
+export async function transcribeChunks(
+  chunks: AudioChunk[],
+  signal?: AbortSignal,
+  onBeforeChunk?: () => Promise<void>
+): Promise<Transcript> {
   const allSegments: TranscriptSegment[] = [];
   let runningId = 0;
   let maxEnd = 0;
 
   for (const chunk of chunks) {
-    const segments = await transcribeChunk(chunk.path);
+    if (onBeforeChunk) await onBeforeChunk();
+    const segments = await transcribeChunk(chunk.path, signal);
     for (const seg of segments) {
       const start = seg.start + chunk.offsetSec;
       const end = seg.end + chunk.offsetSec;

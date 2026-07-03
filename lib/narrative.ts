@@ -77,6 +77,8 @@ export interface NarrativeOptions {
   titleHint?: string;
   /** Other transcripts/scripts uploaded as style/soundbite guides. Never treated as facts about this footage. */
   referenceMaterial?: string;
+  /** Aborts the in-flight LLM request immediately if the pipeline is stopped mid-call. */
+  signal?: AbortSignal;
 }
 
 export async function generateNarrative(
@@ -124,6 +126,7 @@ Build a structured long-form narrative for this footage for the ABH editorial an
       anthropicModel: config.anthropicNarrativeModel,
       groqModel: config.groqNarrativeModel,
       maxTokens: 8000,
+      signal: options.signal,
     }
   )) as Omit<NarrativeResult, 'title' | 'titleOptions'> & { titleOptions?: unknown };
 

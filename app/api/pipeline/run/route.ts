@@ -20,6 +20,7 @@ import { buildNarrativeDocx } from '@/lib/docx-export';
 import { buildSrt } from '@/lib/srt';
 import { writeSession } from '@/lib/session';
 import { config } from '@/lib/config';
+import { createJob, removeJob, checkpoint, getJobSignal } from '@/lib/job-control';
 
 // This route runs the entire pipeline (download -> ffmpeg -> Whisper ->
 // Claude x2 -> exports) inside a single request/response cycle, streaming
@@ -40,6 +41,7 @@ export async function POST(req: NextRequest) {
   let titleHint: string | undefined;
   let referenceMaterial: string | undefined;
   let targetLengthMinutes: number | undefined;
+  let jobId: string | undefined;
 
   try {
     const body = await req.json();
@@ -58,6 +60,7 @@ export async function POST(req: NextRequest) {
     brief = body.brief ? String(body.brief) : undefined;
     titleHint = body.titleHint ? String(body.titleHint) : undefined;
     referenceMaterial = body.referenceMaterial ? String(body.referenceMaterial) : undefined;
+    jobId = body.jobId ? String(body.jobId) : undefined;
 
     if (body.targetLengthMinutes !== undefined && body.targetLengthMinutes !== null && body.targetLengthMinutes !== '') {
       const parsed = Number(body.targetLengthMinutes);
@@ -93,10 +96,16 @@ export async function POST(req: NextRequest) {
   // persisted, but the proactive refresh that already happened will be.
   const refreshedTokens = authCtx.finalizeTokens();
 
+  // Only tracked (pausable/stoppable) if the client sent a jobId; older or
+  // ad-hoc callers without one just run straight through, uninterruptible.
+  if (jobId) createJob(jobId);
+  const signal = jobId ? getJobSignal(jobId) : undefined;
+
   const stream = createSseStream(async (sse) => {
     const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'abh-'));
 
     try {
+      if (jobId) await checkpoint(jobId);
       sse.send('progress', {
         stage: 'metadata',
         message: 'Fetching file metadata from Drive...',
@@ -134,32 +143,42 @@ export async function POST(req: NextRequest) {
       const metadata = await probeVideo(remoteSource);
       metadata.fileName = fileMeta.name;
 
+      if (jobId) await checkpoint(jobId);
       sse.send('progress', {
         stage: 'audio',
         message: 'Streaming audio track from Drive (no local video download)...',
         percent: 30,
       });
       const audioPath = path.join(workDir, 'audio.mp3');
-      await extractAudio(remoteSource, audioPath);
+      await extractAudio(remoteSource, audioPath, signal);
 
+      if (jobId) await checkpoint(jobId);
       sse.send('progress', {
         stage: 'audio',
         message: 'Preparing audio for transcription...',
         percent: 35,
       });
-      const chunks = await chunkAudioIfNeeded(audioPath, workDir);
+      const chunks = await chunkAudioIfNeeded(audioPath, workDir, signal);
 
       sse.send('progress', {
         stage: 'transcribe',
         message: `Transcribing with Whisper (${chunks.length} chunk${chunks.length > 1 ? 's' : ''})...`,
         percent: 45,
       });
-      const transcript = await transcribeChunks(chunks);
+      // onBeforeChunk lets a pause/stop take effect between individual
+      // Whisper chunk uploads, not just between whole pipeline stages --
+      // this is usually the slowest step for long footage.
+      const transcript = await transcribeChunks(
+        chunks,
+        signal,
+        jobId ? () => checkpoint(jobId!) : undefined
+      );
 
       if (transcript.segments.length === 0) {
         throw new Error('Whisper returned an empty transcript for this file (no speech detected?).');
       }
 
+      if (jobId) await checkpoint(jobId);
       sse.send('progress', {
         stage: 'narrative',
         message: 'Generating long-form narrative (ABH brand voice)...',
@@ -170,8 +189,10 @@ export async function POST(req: NextRequest) {
         targetLengthMinutes,
         titleHint,
         referenceMaterial,
+        signal,
       });
 
+      if (jobId) await checkpoint(jobId);
       sse.send('progress', {
         stage: 'shortform',
         message: 'Flagging self-contained short-form moments...',
@@ -183,8 +204,10 @@ export async function POST(req: NextRequest) {
         brief,
         videoTitle: narrative.title,
         referenceMaterial,
+        signal,
       });
 
+      if (jobId) await checkpoint(jobId);
       sse.send('progress', {
         stage: 'export',
         message: 'Building .fcpxml, .docx, and .srt exports...',
@@ -232,6 +255,7 @@ export async function POST(req: NextRequest) {
       });
     } finally {
       fs.rmSync(workDir, { recursive: true, force: true });
+      if (jobId) removeJob(jobId);
     }
   });
 
