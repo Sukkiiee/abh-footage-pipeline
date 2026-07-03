@@ -3,6 +3,7 @@ import { generateStructuredJSON } from './llm';
 import { ABH_BRAND_VOICE_SYSTEM_PROMPT } from './brand-voice';
 import { Transcript, NarrativeResult } from './types';
 import { transcriptToPromptText, formatTimestamp } from './whisper';
+import { formatReferenceBlock } from './reference-material';
 
 const NARRATIVE_TOOL_NAME = 'submit_narrative';
 
@@ -74,6 +75,8 @@ export interface NarrativeOptions {
   targetLengthMinutes?: number;
   /** Optional creative direction for the title options (keywords, angle, names to include). Guides the suggestions; does not fix a single title. */
   titleHint?: string;
+  /** Other transcripts/scripts uploaded as style/soundbite guides. Never treated as facts about this footage. */
+  referenceMaterial?: string;
 }
 
 export async function generateNarrative(
@@ -96,9 +99,11 @@ export async function generateNarrative(
     ? `\nProducer's title direction (keywords/angle to lean into, not a fixed title): "${options.titleHint.trim()}". Let this steer the title options, but still propose several distinct options rather than one.\n`
     : '';
 
+  const referenceBlock = formatReferenceBlock(options.referenceMaterial);
+
   const userPrompt = `Source footage: "${sourceFileName}"
 Total duration: ${totalDuration}
-${briefBlock}${targetLengthBlock}${titleHintBlock}
+${briefBlock}${targetLengthBlock}${titleHintBlock}${referenceBlock}
 Below is the full timestamped transcript of the raw footage. Each line is [start - end] followed by what was said.
 
 ---TRANSCRIPT START---

@@ -3,6 +3,7 @@ import { generateStructuredJSON } from './llm';
 import { ABH_BRAND_VOICE_SYSTEM_PROMPT } from './brand-voice';
 import { Transcript, TranscriptSegment, ShortFormClip } from './types';
 import { transcriptToPromptText, formatTimestamp, parseTimestamp } from './whisper';
+import { formatReferenceBlock } from './reference-material';
 
 const SHORTFORM_TOOL_NAME = 'submit_short_form_clips';
 
@@ -105,6 +106,8 @@ export interface ShortFormOptions {
   brief?: string;
   /** The long-form piece's chosen title (or a producer title hint), if any -- passed as context so per-clip titles read as part of the same series without repeating it outright. */
   videoTitle?: string;
+  /** Other transcripts/scripts uploaded as guides for what a strong short-form soundbite looks like. Never treated as facts about this footage. */
+  referenceMaterial?: string;
 }
 
 export async function extractShortFormClips(
@@ -123,9 +126,11 @@ export async function extractShortFormClips(
     ? `\nThis footage's video title is "${options.videoTitle.trim()}". Keep each clip's title consistent in tone with it, but each clip title should still describe that specific clip, not repeat the video title.\n`
     : '';
 
+  const referenceBlock = formatReferenceBlock(options.referenceMaterial);
+
   const userPrompt = `Source footage: "${sourceFileName}"
 Total duration: ${totalDuration}
-${briefBlock}${titleBlock}
+${briefBlock}${titleBlock}${referenceBlock}
 Below is the full timestamped transcript of the raw footage.
 
 ---TRANSCRIPT START---

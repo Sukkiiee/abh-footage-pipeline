@@ -38,6 +38,7 @@ export async function POST(req: NextRequest) {
   let localMediaPath: string | undefined;
   let brief: string | undefined;
   let titleHint: string | undefined;
+  let referenceMaterial: string | undefined;
   let targetLengthMinutes: number | undefined;
 
   try {
@@ -56,6 +57,7 @@ export async function POST(req: NextRequest) {
     localMediaPath = body.localMediaPath ? String(body.localMediaPath) : undefined;
     brief = body.brief ? String(body.brief) : undefined;
     titleHint = body.titleHint ? String(body.titleHint) : undefined;
+    referenceMaterial = body.referenceMaterial ? String(body.referenceMaterial) : undefined;
 
     if (body.targetLengthMinutes !== undefined && body.targetLengthMinutes !== null && body.targetLengthMinutes !== '') {
       const parsed = Number(body.targetLengthMinutes);
@@ -167,6 +169,7 @@ export async function POST(req: NextRequest) {
         brief,
         targetLengthMinutes,
         titleHint,
+        referenceMaterial,
       });
 
       sse.send('progress', {
@@ -179,6 +182,7 @@ export async function POST(req: NextRequest) {
       const { clips, rejected } = await extractShortFormClips(transcript, fileMeta.name, {
         brief,
         videoTitle: narrative.title,
+        referenceMaterial,
       });
 
       sse.send('progress', {

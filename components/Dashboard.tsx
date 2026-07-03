@@ -15,6 +15,13 @@ interface AuthStatus {
   folderName: string | null;
 }
 
+interface ReferenceDoc {
+  filename: string;
+  text: string;
+}
+
+const MAX_REFERENCE_CHARS = 20000; // mirrors lib/reference-material.ts server-side cap
+
 interface PipelineDone {
   sourceFileName: string;
   narrative: NarrativeResult;
@@ -143,6 +150,29 @@ function combineSrtToBase64(
   return utf8ToBase64(chunks.join('\n'));
 }
 
+function readFileAsText(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(reader.error || new Error('Failed to read file.'));
+    reader.readAsText(file);
+  });
+}
+
+function readFileAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result || '');
+      // strip the "data:<mime>;base64," prefix from a data URL
+      const commaIndex = result.indexOf(',');
+      resolve(commaIndex >= 0 ? result.slice(commaIndex + 1) : result);
+    };
+    reader.onerror = () => reject(reader.error || new Error('Failed to read file.'));
+    reader.readAsDataURL(file);
+  });
+}
+
 export default function Dashboard() {
   const [status, setStatus] = useState<AuthStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -157,6 +187,8 @@ export default function Dashboard() {
   const [brief, setBrief] = useState('');
   const [targetLengthMinutes, setTargetLengthMinutes] = useState('');
   const [driveLinkInput, setDriveLinkInput] = useState('');
+  const [referenceDocs, setReferenceDocs] = useState<ReferenceDoc[]>([]);
+  const [referenceUploadBusy, setReferenceUploadBusy] = useState(false);
 
   const [runningFileId, setRunningFileId] = useState<string | null>(null);
   const [runningLabel, setRunningLabel] = useState('');
@@ -240,6 +272,56 @@ export default function Dashboard() {
     setFiles(null);
   }
 
+  async function handleReferenceUpload(fileList: FileList | null) {
+    if (!fileList || fileList.length === 0) return;
+    setError(null);
+    setReferenceUploadBusy(true);
+    try {
+      for (const file of Array.from(fileList)) {
+        const lower = file.name.toLowerCase();
+        try {
+          if (lower.endsWith('.txt') || lower.endsWith('.md')) {
+            const text = await readFileAsText(file);
+            setReferenceDocs((prev) => [...prev, { filename: file.name, text }]);
+          } else if (lower.endsWith('.docx')) {
+            const base64 = await readFileAsBase64(file);
+            const res = await fetch('/api/reference/parse', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ filename: file.name, base64 }),
+            });
+            const data = await res.json();
+            if (!res.ok) {
+              setError(data.error || `Failed to parse "${file.name}".`);
+              continue;
+            }
+            setReferenceDocs((prev) => [...prev, { filename: file.name, text: data.text || '' }]);
+          } else {
+            setError(
+              `"${file.name}": only .txt, .md, and .docx reference files are supported right now.`
+            );
+          }
+        } catch (err) {
+          setError(err instanceof Error ? err.message : `Failed to read "${file.name}".`);
+        }
+      }
+    } finally {
+      setReferenceUploadBusy(false);
+    }
+  }
+
+  function removeReferenceDoc(filename: string) {
+    setReferenceDocs((prev) => prev.filter((d) => d.filename !== filename));
+  }
+
+  function buildReferenceMaterial(): string | undefined {
+    if (referenceDocs.length === 0) return undefined;
+    const combined = referenceDocs
+      .map((d) => `--- ${d.filename} ---\n${d.text.trim()}`)
+      .join('\n\n');
+    return combined.slice(0, MAX_REFERENCE_CHARS);
+  }
+
   async function runPipeline(
     target: { fileId?: string; driveLink?: string; displayName: string },
     opts?: { collect?: (data: PipelineDone) => void }
@@ -262,6 +344,7 @@ export default function Dashboard() {
           localMediaPath: localMediaPath || undefined,
           titleHint: titleHint || undefined,
           brief: brief || undefined,
+          referenceMaterial: buildReferenceMaterial(),
           targetLengthMinutes:
             parsedTargetLength && Number.isFinite(parsedTargetLength) && parsedTargetLength > 0
               ? parsedTargetLength
@@ -538,7 +621,53 @@ export default function Dashboard() {
               affect short-form clip length (always 15-60s).
             </p>
 
-            <span className="field-label">Local media path for FCPXML</span>
+            <span className="field-label">Reference documents (optional)</span>
+            <p className="muted" style={{ marginTop: 0 }}>
+              Upload other transcripts or scripts as style/soundbite guides -- the pipeline uses
+              them to calibrate what a strong moment looks like, never as facts about this
+              footage. Supports .txt, .md, and .docx (PDF isn&apos;t supported yet -- convert to
+              one of those first).
+            </p>
+            <input
+              type="file"
+              multiple
+              accept=".txt,.md,.docx"
+              onChange={(e) => {
+                handleReferenceUpload(e.target.files);
+                e.target.value = '';
+              }}
+              disabled={referenceUploadBusy}
+            />
+            {referenceUploadBusy && <p className="muted">Reading file(s)...</p>}
+            {referenceDocs.length > 0 && (
+              <div style={{ marginTop: 8 }}>
+                {referenceDocs.map((d) => (
+                  <div
+                    key={d.filename}
+                    className="file-row"
+                    style={{ padding: '8px 0' }}
+                  >
+                    <span className="file-sub">
+                      {d.filename} · {d.text.length.toLocaleString()} chars
+                    </span>
+                    <button className="secondary" onClick={() => removeReferenceDoc(d.filename)}>
+                      Remove
+                    </button>
+                  </div>
+                ))}
+                {(() => {
+                  const total = referenceDocs.reduce((sum, d) => sum + d.text.length, 0);
+                  return total > MAX_REFERENCE_CHARS ? (
+                    <p className="muted" style={{ color: 'var(--danger)' }}>
+                      Combined reference material is {total.toLocaleString()} characters; only the
+                      first {MAX_REFERENCE_CHARS.toLocaleString()} are sent per run.
+                    </p>
+                  ) : null;
+                })()}
+              </div>
+            )}
+
+            <span className="field-label" style={{ marginTop: 12 }}>Local media path for FCPXML</span>
             <input
               type="text"
               placeholder="/Users/editor/Movies/ABH_Footage/"
