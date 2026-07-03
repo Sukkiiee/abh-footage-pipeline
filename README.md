@@ -75,7 +75,18 @@ npm run dev
 
 Open http://localhost:3000, connect Drive, paste a folder URL/ID, and run the pipeline on a file.
 
-## Deploying to Vercel
+## Deploying for free (Render)
+
+Vercel's free (Hobby) tier caps serverless functions at well under a minute, which this pipeline will blow past on any real footage -- it isn't a fit for genuinely free hosting here. **Render's free tier is**: free web services support up to a 100-minute request duration (this runs as a normal persistent Node process there, not a short-lived serverless function), so the whole pipeline can just run to completion. The tradeoff: a free Render service spins down after 15 minutes with no traffic, and the next request pays a ~30-60s cold-start penalty to spin back up -- fine for occasional/personal use, not an always-on production service.
+
+1. Push this repo to GitHub.
+2. [render.com](https://render.com) → **New → Web Service** → connect the repo.
+3. Build command: `npm install && npm run build`. Start command: `npm run start` (already reads Render's injected `$PORT`).
+4. Add the same environment variables from `.env.local` under the service's **Environment** tab. You don't need to set `APP_URL` -- the app already falls back to Render's auto-injected `RENDER_EXTERNAL_URL`.
+5. Once deployed, go back to Google Cloud Console → your OAuth client → **Authorized redirect URIs** → add `https://your-app.onrender.com/api/auth/google/callback` (keep the `localhost:3000` one too, for local dev).
+6. Google Cloud Console → **OAuth consent screen → Test users** → add the Google account(s) of anyone besides you who should be able to connect Drive (see below).
+
+## Deploying to Vercel (paid, for long footage without cold starts)
 
 ```bash
 vercel deploy
@@ -83,10 +94,17 @@ vercel deploy
 
 Set the same environment variables in the Vercel project settings (Production and Preview). Set `APP_URL` to your deployed URL (or rely on Vercel's auto-injected `VERCEL_URL`, which the app already falls back to).
 
-**Function duration matters here.** The whole pipeline (download, ffmpeg, Whisper, two Claude calls, exports) runs inside one request. `app/api/pipeline/run/route.ts` sets `maxDuration = 800`, which requires a **Vercel Pro plan with Fluid Compute enabled**. On Hobby (10-60s cap) or Pro without Fluid Compute (300s cap), long footage will hit the timeout mid-pipeline. Rough guide:
+**Function duration matters here.** The whole pipeline (download, ffmpeg, Whisper, two LLM calls, exports) runs inside one request. `app/api/pipeline/run/route.ts` sets `maxDuration = 800`, which requires a **Vercel Pro plan with Fluid Compute enabled**. On Hobby (10-60s cap) or Pro without Fluid Compute (300s cap), long footage will hit the timeout mid-pipeline. Rough guide:
 
 - Under ~15-20 min of footage: fine even at a 300s cap.
 - Longer than that: you need the extended (800s) duration, or you'll want to move to a background-job architecture (see Limitations).
+
+## Letting other people use it
+
+This already supports multiple people without any code changes: each visitor gets their own encrypted session cookie in their own browser, so each person connects their own Google account and their own Drive folder independently. Two things to know before sharing the URL around:
+
+- **Google's OAuth app is in Testing mode by default**, capped at 100 explicitly-added test users -- add each person's Google account under **OAuth consent screen → Test users** in Google Cloud Console, or they'll hit an "access blocked" error. Opening it to the general public (not pre-added accounts) requires Google's app-verification review for the Drive scope, which is a separate process (privacy policy, terms of service, review turnaround) outside this app's code.
+- **Your Groq/Anthropic API keys are shared across everyone who uses the deployed instance** -- their usage draws on your quota/cost, and Groq's free-tier rate limit is shared too, so several people running pipelines at once will hit it faster than solo use.
 
 ## Limitations / things to know
 

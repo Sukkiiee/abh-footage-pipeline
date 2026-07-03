@@ -57,10 +57,11 @@ export const config = {
     return required('SESSION_SECRET');
   },
   // Base URL of the deployed app, used to build the OAuth redirect URI.
-  // Falls back to Vercel's auto-injected URL, then localhost for dev.
+  // Falls back to Vercel's or Render's auto-injected URL, then localhost.
   get appUrl() {
     if (process.env.APP_URL) return process.env.APP_URL;
     if (process.env.VERCEL_URL) return `https://${process.env.VERCEL_URL}`;
+    if (process.env.RENDER_EXTERNAL_URL) return process.env.RENDER_EXTERNAL_URL;
     return 'http://localhost:3000';
   },
   // Optional: default local path (on the editor's machine) where the FCPXML
