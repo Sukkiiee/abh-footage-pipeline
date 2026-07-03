@@ -8,6 +8,7 @@ import { getYtDlpPath } from './ytdlp';
 import { extractFileId, getDriveMediaUrl, getFileMetadata, VIDEO_MIME_TYPES } from './google-drive';
 import { extractAudio, chunkAudioIfNeeded } from './media';
 import { transcribeChunks, transcriptToPromptText } from './whisper';
+import { config } from './config';
 
 const execFileAsync = promisify(execFile);
 
@@ -33,6 +34,22 @@ function isYouTubeUrl(url: string): boolean {
 // resolve the URL.
 const STREAMING_USER_AGENT =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
+/**
+ * Writes YT_DLP_COOKIES_CONTENT (if configured) to a cookies.txt file
+ * inside the given directory and returns its path, or undefined if no
+ * cookies are configured. YouTube's bot detection challenges requests from
+ * datacenter/cloud IPs (a hosted deployment) far more than a typical home
+ * connection, and will outright refuse ("Sign in to confirm you're not a
+ * bot") without a real logged-in session's cookies -- this is yt-dlp's own
+ * documented fix for that, not something specific to this app.
+ */
+function writeCookiesFileIfConfigured(workDir: string): string | undefined {
+  if (!config.ytDlpCookiesContent) return undefined;
+  const cookiesPath = path.join(workDir, 'cookies.txt');
+  fs.writeFileSync(cookiesPath, config.ytDlpCookiesContent, 'utf8');
+  return cookiesPath;
+}
 
 /**
  * A Drive video link is handled with the exact same machinery as the main
@@ -88,35 +105,48 @@ async function extractFromDriveUrl(
  */
 async function extractFromYouTubeUrlStreaming(url: string): Promise<ReferenceVideoResult> {
   const ytDlpPath = await getYtDlpPath();
-
-  // One combined call for both fields, not two separate ones: YouTube
-  // extraction currently runs a lengthy (~30-45s) info-resolution step per
-  // invocation in environments without a JS runtime available to yt-dlp
-  // (common on a plain server), and issuing it twice roughly doubles that
-  // wait for no benefit -- measured ~95s for two calls vs. ~40s for one.
-  const { stdout } = await execFileAsync(
-    ytDlpPath,
-    ['-f', 'bestaudio', '--skip-download', '--no-playlist', '--print', '%(title)s', '--print', '%(urls)s', url],
-    { maxBuffer: 2 * 1024 * 1024, timeout: 90 * 1000 }
-  );
-
-  const lines = stdout.trim().split('\n').filter((l) => l.trim());
-  const title = lines[0] || url;
-  // --print urls can itself be multiple lines for some formats; -f
-  // bestaudio should keep it to one, but take the last line defensively.
-  const directUrl = lines.length > 1 ? lines[lines.length - 1] : undefined;
-
-  if (!directUrl) {
-    throw new Error('yt-dlp did not resolve a direct audio URL for this video.');
-  }
-
-  const remoteSource = {
-    url: directUrl,
-    headers: { 'User-Agent': STREAMING_USER_AGENT },
-  };
-
   const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'abh-ref-yt-stream-'));
+
   try {
+    const cookiesPath = writeCookiesFileIfConfigured(workDir);
+
+    // One combined call for both fields, not two separate ones: YouTube
+    // extraction currently runs a lengthy (~30-45s) info-resolution step per
+    // invocation in environments without a JS runtime available to yt-dlp
+    // (common on a plain server), and issuing it twice roughly doubles that
+    // wait for no benefit -- measured ~95s for two calls vs. ~40s for one.
+    const { stdout } = await execFileAsync(
+      ytDlpPath,
+      [
+        '-f',
+        'bestaudio',
+        '--skip-download',
+        '--no-playlist',
+        ...(cookiesPath ? ['--cookies', cookiesPath] : []),
+        '--print',
+        '%(title)s',
+        '--print',
+        '%(urls)s',
+        url,
+      ],
+      { maxBuffer: 2 * 1024 * 1024, timeout: 90 * 1000 }
+    );
+
+    const lines = stdout.trim().split('\n').filter((l) => l.trim());
+    const title = lines[0] || url;
+    // --print urls can itself be multiple lines for some formats; -f
+    // bestaudio should keep it to one, but take the last line defensively.
+    const directUrl = lines.length > 1 ? lines[lines.length - 1] : undefined;
+
+    if (!directUrl) {
+      throw new Error('yt-dlp did not resolve a direct audio URL for this video.');
+    }
+
+    const remoteSource = {
+      url: directUrl,
+      headers: { 'User-Agent': STREAMING_USER_AGENT },
+    };
+
     const audioPath = path.join(workDir, 'audio.mp3');
     await extractAudio(remoteSource, audioPath);
     const chunks = await chunkAudioIfNeeded(audioPath, workDir);
@@ -146,6 +176,7 @@ async function extractFromGenericVideoUrl(url: string): Promise<ReferenceVideoRe
 
   try {
     const outputTemplate = path.join(workDir, 'audio.%(ext)s');
+    const cookiesPath = writeCookiesFileIfConfigured(workDir);
 
     let stdout: string;
     try {
@@ -160,6 +191,7 @@ async function extractFromGenericVideoUrl(url: string): Promise<ReferenceVideoRe
           '--ffmpeg-location',
           ffmpegBinaryPath,
           '--no-playlist',
+          ...(cookiesPath ? ['--cookies', cookiesPath] : []),
           // --print implies --simulate on its own, which would otherwise
           // skip the actual download entirely while still happily printing
           // the title -- --no-simulate overrides that so both happen.
@@ -183,9 +215,11 @@ async function extractFromGenericVideoUrl(url: string): Promise<ReferenceVideoRe
         .filter((l) => l.trim())
         .slice(-3)
         .join(' ');
-      throw new Error(
-        `Could not fetch that video link${hint ? `: ${hint}` : ''}. Instagram posts in particular often need a logged-in session this app doesn't have configured; a public YouTube link is the most reliable option.`
-      );
+      const isBotCheck = /sign in to confirm/i.test(stderr);
+      const suffix = isBotCheck
+        ? ' This is YouTube challenging the request as coming from a datacenter/cloud IP (common on a hosted deployment, rarer on a home connection) -- set YT_DLP_COOKIES_CONTENT to a real logged-in session\'s exported cookies.txt to fix it (see README).'
+        : " Instagram posts in particular often need a logged-in session this app doesn't have configured; a public YouTube link is the most reliable option.";
+      throw new Error(`Could not fetch that video link${hint ? `: ${hint}` : ''}.${suffix}`);
     }
 
     const title = stdout.trim().split('\n')[0] || url;

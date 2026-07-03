@@ -91,4 +91,18 @@ export const config = {
     const parsed = raw ? Number(raw) : NaN;
     return Number.isFinite(parsed) && parsed > 0 ? parsed : 60000;
   },
+  // Optional: raw Netscape-format cookies.txt content (not a file path --
+  // env vars can't easily reference a file on most hosts) for yt-dlp to
+  // authenticate YouTube requests as a real logged-in session. Needed on
+  // hosted deployments in particular: YouTube's bot detection challenges
+  // requests from datacenter/cloud IPs (Render, Vercel, etc.) far more
+  // than from a typical home connection, and will refuse to serve video
+  // info at all ("Sign in to confirm you're not a bot") without this.
+  // Export your own cookies with a browser extension like "Get
+  // cookies.txt LOCALLY" while logged into youtube.com, then paste the
+  // file's contents here. Treat it like a credential -- it's your
+  // personal session.
+  get ytDlpCookiesContent() {
+    return process.env.YT_DLP_COOKIES_CONTENT || undefined;
+  },
 };
