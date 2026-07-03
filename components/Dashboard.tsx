@@ -235,6 +235,7 @@ export default function Dashboard() {
   const [filesTruncated, setFilesTruncated] = useState(false);
   const [processedMap, setProcessedMap] = useState<Record<string, string>>({});
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [footageListExpanded, setFootageListExpanded] = useState(true);
   const [localMediaPath, setLocalMediaPath] = useState('');
   const [titleHint, setTitleHint] = useState('');
   const [brief, setBrief] = useState('');
@@ -260,6 +261,7 @@ export default function Dashboard() {
   const [paused, setPaused] = useState(false);
   const [controlBusy, setControlBusy] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [estimatedTotalSeconds, setEstimatedTotalSeconds] = useState<number | null>(null);
 
   const isBusy = runningFileId !== null || batchActive || combining;
 
@@ -427,6 +429,7 @@ export default function Dashboard() {
     setRunningFileId(target.fileId || 'link');
     setPaused(false);
     setElapsedSeconds(0);
+    setEstimatedTotalSeconds(target.sizeBytes ? estimateDurationSeconds(target.sizeBytes) : null);
 
     const jobId =
       typeof crypto !== 'undefined' && crypto.randomUUID
@@ -857,7 +860,13 @@ export default function Dashboard() {
 
           <div className="card">
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
-              <h2 style={{ marginBottom: 0 }}>Step 3 · Footage</h2>
+              <h2
+                style={{ marginBottom: 0, cursor: 'pointer' }}
+                onClick={() => setFootageListExpanded((v) => !v)}
+              >
+                {footageListExpanded ? '▾' : '▸'} Step 3 · Footage{files ? ` (${files.length})` : ''}
+                {selectedIds.size > 0 ? ` · ${selectedIds.size} selected` : ''}
+              </h2>
               <button onClick={runSelected} disabled={isBusy || selectedIds.size === 0}>
                 {batchActive && batchProgress
                   ? `Processing ${batchProgress.current}/${batchProgress.total}...`
@@ -870,7 +879,7 @@ export default function Dashboard() {
               Includes footage in subfolders of the connected folder, not just files at the top
               level. Check the files you want, then run them together -- if you select more than
               one, the results combine into a single .docx / .fcpxml / .srt instead of one set
-              per video.
+              per video. Click the heading above to collapse/expand the list.
             </p>
             {files && files.length > 0 && (
               <div className="download-row" style={{ marginBottom: 8 }}>
@@ -903,39 +912,43 @@ export default function Dashboard() {
             )}
             {!files && <p className="muted">Loading footage...</p>}
             {files && files.length === 0 && <p className="muted">No .mp4/.mov files found in this folder or its subfolders.</p>}
-            {files &&
-              files.map((f) => {
-                const isProcessed = !!processedMap[f.id];
-                const isRunning = runningFileId === f.id;
-                const estimate = f.size ? estimateDurationSeconds(Number(f.size)) : null;
-                return (
-                  <label className="file-row" key={f.id} style={{ cursor: isBusy ? 'default' : 'pointer' }}>
-                    <input
-                      type="checkbox"
-                      checked={selectedIds.has(f.id)}
-                      onChange={() => toggleSelected(f.id)}
-                      disabled={isBusy}
-                      style={{ marginRight: 12 }}
-                    />
-                    <div className="file-meta">
-                      <span className="file-name">
-                        {f.name}
-                        <span className={`badge ${isProcessed ? 'processed' : 'new'}`}>
-                          {isProcessed ? 'Processed' : 'New'}
-                        </span>
-                        {isRunning && <span className="badge new">Processing now</span>}
-                      </span>
-                      <span className="file-sub">
-                        {f.folderPath ? `${f.folderPath}/ · ` : ''}
-                        {formatBytes(f.size)} {f.createdTime ? `· added ${new Date(f.createdTime).toLocaleString()}` : ''}
-                        {estimate !== null
-                          ? ` · ~${formatDuration(estimate)} estimated`
-                          : ' · no time estimate yet (based on past runs on this machine)'}
-                      </span>
-                    </div>
-                  </label>
-                );
-              })}
+            {footageListExpanded && (
+              <div style={{ maxHeight: 480, overflowY: 'auto' }}>
+                {files &&
+                  files.map((f) => {
+                    const isProcessed = !!processedMap[f.id];
+                    const isRunning = runningFileId === f.id;
+                    const estimate = f.size ? estimateDurationSeconds(Number(f.size)) : null;
+                    return (
+                      <label className="file-row" key={f.id} style={{ cursor: isBusy ? 'default' : 'pointer' }}>
+                        <input
+                          type="checkbox"
+                          checked={selectedIds.has(f.id)}
+                          onChange={() => toggleSelected(f.id)}
+                          disabled={isBusy}
+                          style={{ marginRight: 12 }}
+                        />
+                        <div className="file-meta">
+                          <span className="file-name">
+                            {f.name}
+                            <span className={`badge ${isProcessed ? 'processed' : 'new'}`}>
+                              {isProcessed ? 'Processed' : 'New'}
+                            </span>
+                            {isRunning && <span className="badge new">Processing now</span>}
+                          </span>
+                          <span className="file-sub">
+                            {f.folderPath ? `${f.folderPath}/ · ` : ''}
+                            {formatBytes(f.size)} {f.createdTime ? `· added ${new Date(f.createdTime).toLocaleString()}` : ''}
+                            {estimate !== null
+                              ? ` · ~${formatDuration(estimate)} estimated`
+                              : ' · no time estimate yet (based on past runs on this machine)'}
+                          </span>
+                        </div>
+                      </label>
+                    );
+                  })}
+              </div>
+            )}
           </div>
         </>
       )}
@@ -951,7 +964,11 @@ export default function Dashboard() {
               {paused ? ' (paused)' : ''}
             </h2>
             <span className="muted" style={{ fontSize: 13 }}>
-              Elapsed: {formatDuration(elapsedSeconds)}
+              {estimatedTotalSeconds !== null
+                ? elapsedSeconds < estimatedTotalSeconds
+                  ? `Est. remaining: ${formatDuration(estimatedTotalSeconds - elapsedSeconds)}`
+                  : `Est. remaining: almost done (took longer than the ${formatDuration(estimatedTotalSeconds)} estimate)`
+                : `Elapsed: ${formatDuration(elapsedSeconds)} (no estimate yet -- based on past runs on this machine)`}
             </span>
           </div>
           <div className="progress-track">

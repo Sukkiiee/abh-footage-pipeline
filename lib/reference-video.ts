@@ -24,6 +24,16 @@ function isGoogleDriveUrl(url: string): boolean {
   return /(^|\.)drive\.google\.com/i.test(url);
 }
 
+function isYouTubeUrl(url: string): boolean {
+  return /(^|\.)(youtube\.com|youtu\.be)/i.test(url);
+}
+
+// A generic modern desktop browser UA; googlevideo.com CDN URLs generally
+// just need *some* reasonable UA present, not the exact one yt-dlp used to
+// resolve the URL.
+const STREAMING_USER_AGENT =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
 /**
  * A Drive video link is handled with the exact same machinery as the main
  * pipeline (stream directly from Drive into ffmpeg, no local video file)
@@ -62,9 +72,67 @@ async function extractFromDriveUrl(
 }
 
 /**
- * Everything else (YouTube, Instagram, and anything else yt-dlp supports)
- * goes through yt-dlp to pull audio only, then the same Whisper
- * transcription used everywhere else in the app.
+ * YouTube-specific fast path: resolve the direct CDN URL for the best
+ * audio-only stream via `yt-dlp -g` (no download at all, just metadata
+ * resolution) and hand that URL straight to ffmpeg, exactly like the Drive
+ * remote-source path -- so the only thing ever written to disk is the
+ * small final extracted mp3, not an intermediate downloaded audio file.
+ *
+ * Only attempted for YouTube specifically: its resolved URLs are reliably
+ * fetchable with just a standard User-Agent, and the -g path is
+ * well-trodden for this site. Other sites (Instagram in particular) tend
+ * to need session/cookie handling that yt-dlp's own downloader manages
+ * internally but `-g` mode does not surface -- for those, the download-
+ * based path below (which lets yt-dlp handle its own auth/format quirks)
+ * is more reliable, not less.
+ */
+async function extractFromYouTubeUrlStreaming(url: string): Promise<ReferenceVideoResult> {
+  const ytDlpPath = await getYtDlpPath();
+
+  // One combined call for both fields, not two separate ones: YouTube
+  // extraction currently runs a lengthy (~30-45s) info-resolution step per
+  // invocation in environments without a JS runtime available to yt-dlp
+  // (common on a plain server), and issuing it twice roughly doubles that
+  // wait for no benefit -- measured ~95s for two calls vs. ~40s for one.
+  const { stdout } = await execFileAsync(
+    ytDlpPath,
+    ['-f', 'bestaudio', '--skip-download', '--no-playlist', '--print', '%(title)s', '--print', '%(urls)s', url],
+    { maxBuffer: 2 * 1024 * 1024, timeout: 90 * 1000 }
+  );
+
+  const lines = stdout.trim().split('\n').filter((l) => l.trim());
+  const title = lines[0] || url;
+  // --print urls can itself be multiple lines for some formats; -f
+  // bestaudio should keep it to one, but take the last line defensively.
+  const directUrl = lines.length > 1 ? lines[lines.length - 1] : undefined;
+
+  if (!directUrl) {
+    throw new Error('yt-dlp did not resolve a direct audio URL for this video.');
+  }
+
+  const remoteSource = {
+    url: directUrl,
+    headers: { 'User-Agent': STREAMING_USER_AGENT },
+  };
+
+  const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'abh-ref-yt-stream-'));
+  try {
+    const audioPath = path.join(workDir, 'audio.mp3');
+    await extractAudio(remoteSource, audioPath);
+    const chunks = await chunkAudioIfNeeded(audioPath, workDir);
+    const transcript = await transcribeChunks(chunks);
+    return { title, text: transcriptToPromptText(transcript) };
+  } finally {
+    fs.rmSync(workDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Everything else (Instagram, and anything else yt-dlp supports), plus the
+ * fallback if YouTube's streaming path above fails for any reason (an
+ * expired resolved URL, an unusual format, etc.) -- goes through yt-dlp's
+ * own downloader to pull audio only, then the same Whisper transcription
+ * used everywhere else in the app.
  *
  * Known reliability differences by platform: YouTube generally works
  * well for public videos. Instagram is best-effort -- many posts
@@ -152,5 +220,17 @@ export async function extractReferenceFromUrl(
     }
     return extractFromDriveUrl(driveCtx.drive, driveCtx.accessToken, url);
   }
+
+  if (isYouTubeUrl(url)) {
+    try {
+      return await extractFromYouTubeUrlStreaming(url);
+    } catch {
+      // Streaming path failed (expired URL, unusual format, etc.) -- fall
+      // back to the ordinary download-based path rather than failing the
+      // whole request over what's usually a transient/edge-case issue.
+      return extractFromGenericVideoUrl(url);
+    }
+  }
+
   return extractFromGenericVideoUrl(url);
 }
