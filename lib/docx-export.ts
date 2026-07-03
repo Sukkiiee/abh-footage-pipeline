@@ -29,6 +29,36 @@ function bodyCell(text: string): TableCell {
   });
 }
 
+/**
+ * A table cell with one line per entry, each optionally bold-labeled --
+ * renders as genuinely separate lines (one Paragraph per line). A single
+ * TextRun with literal "\n" characters does NOT render as line breaks in
+ * Word; it silently runs everything together on one line, which is what
+ * produced garbled-looking Hook/Idea/Payoff and Caption/Platform cells
+ * before this fix.
+ */
+function multiLineCell(lines: Array<{ label?: string; text: string }>): TableCell {
+  const nonEmpty = lines.filter((l) => l.text && l.text.trim().length > 0);
+  if (nonEmpty.length === 0) {
+    return new TableCell({
+      children: [new Paragraph({ children: [new TextRun({ text: '-' })] })],
+    });
+  }
+  return new TableCell({
+    children: nonEmpty.map(
+      (l) =>
+        new Paragraph({
+          children: l.label
+            ? [
+                new TextRun({ text: `${l.label}: `, bold: true }),
+                new TextRun({ text: l.text }),
+              ]
+            : [new TextRun({ text: l.text })],
+        })
+    ),
+  });
+}
+
 const NO_BORDER = {
   top: { style: BorderStyle.SINGLE, size: 1, color: 'CCCCCC' },
   bottom: { style: BorderStyle.SINGLE, size: 1, color: 'CCCCCC' },
@@ -169,15 +199,6 @@ export async function buildNarrativeDocx(opts: DocxExportOptions): Promise<Buffe
 
     const rows = clips.map((clip, i) => {
       const duration = Math.round(clip.endSec - clip.startSec);
-      const hookIdeaPayoff = `Hook: ${clip.hook}\nIdea: ${clip.singleIdea}\nPayoff: ${clip.payoff}`;
-      const captionPlatforms = [
-        clip.suggestedCaption ? `"${clip.suggestedCaption}"` : '',
-        clip.platformFit && clip.platformFit.length > 0
-          ? `[${clip.platformFit.join(', ')}]`
-          : '',
-      ]
-        .filter(Boolean)
-        .join('\n');
 
       return new TableRow({
         children: [
@@ -186,9 +207,18 @@ export async function buildNarrativeDocx(opts: DocxExportOptions): Promise<Buffe
           bodyCell(clip.startTimestamp),
           bodyCell(clip.endTimestamp),
           bodyCell(String(duration)),
-          bodyCell(hookIdeaPayoff),
+          multiLineCell([
+            { label: 'Hook', text: clip.hook },
+            { label: 'Idea', text: clip.singleIdea },
+            { label: 'Payoff', text: clip.payoff },
+          ]),
           bodyCell(clip.rationale),
-          bodyCell(captionPlatforms),
+          multiLineCell([
+            clip.suggestedCaption ? { text: `"${clip.suggestedCaption}"` } : { text: '' },
+            clip.platformFit && clip.platformFit.length > 0
+              ? { text: `[${clip.platformFit.join(', ')}]` }
+              : { text: '' },
+          ]),
         ],
       });
     });
