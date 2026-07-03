@@ -20,7 +20,10 @@ interface ReferenceDoc {
   text: string;
 }
 
-const MAX_REFERENCE_CHARS = 20000; // mirrors lib/reference-material.ts server-side cap
+// Mirrors lib/config.ts's referenceMaterialMaxChars default. If you set
+// REFERENCE_MATERIAL_MAX_CHARS in .env.local to something else, update this
+// to match so the client-side warning/truncation stays accurate.
+const MAX_REFERENCE_CHARS = 60000;
 
 interface PipelineDone {
   sourceFileName: string;

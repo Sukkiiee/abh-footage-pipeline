@@ -79,4 +79,15 @@ export const config = {
     const parsed = raw ? Number(raw) : NaN;
     return Number.isFinite(parsed) && parsed > 0 ? parsed : 10;
   },
+  // Cap on combined reference material (uploaded docs + transcribed
+  // reference videos), in characters. It's sent to the LLM on every run --
+  // both the narrative and short-form calls -- so higher isn't free: more
+  // tokens per run, every run, even when the reference material itself
+  // never changes. Raise if you have more reference material you want
+  // actually used rather than silently truncated.
+  get referenceMaterialMaxChars() {
+    const raw = process.env.REFERENCE_MATERIAL_MAX_CHARS;
+    const parsed = raw ? Number(raw) : NaN;
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 60000;
+  },
 };
