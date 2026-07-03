@@ -16,6 +16,8 @@ the spine, and a `.srt` subtitle file of the full transcript.
 5. **Short-form** — a second LLM call flags self-contained 15-60s moments (hook in the first 2 seconds, single idea, clear payoff), each with its own set of title options (same "suggest, don't dictate" pattern as the long-form title), informed by the brief, the chosen long-form title if set, and any reference documents, validated/clamped against real transcript timestamps server-side.
 
 **Reference documents.** You can upload other transcripts/scripts (`.txt`, `.md`, `.docx`; `.docx` parsed server-side via `mammoth`) as style and soundbite-quality guides -- e.g. past short-form picks that worked well. They're explicitly framed to the model as calibration material only ("what makes a strong moment"), never as facts about the current footage, so it doesn't blend content across videos. Capped at 20,000 combined characters per run.
+
+**Reference videos.** You can also paste a video link (YouTube, Instagram, Google Drive, or most other sites) instead of/alongside uploading documents. A Drive link reuses the exact same streaming-from-Drive + Whisper pipeline as the main footage. Anything else goes through `yt-dlp` (auto-downloaded on first use, no separate install needed for a public YouTube link) to pull audio only, then the same Whisper transcription -- the resulting timestamped transcript is added as another reference entry. Reliability varies by platform: YouTube (public videos) works well; Instagram is best-effort since many posts require a logged-in session this app doesn't have configured, and will fail with a clear error rather than something silently wrong. This downloads third-party content on your behalf -- make sure your use complies with the source platform's terms and any applicable copyright law; it's meant for personal creative reference, not redistribution.
 6. **Export** — builds a frame-accurate `.fcpxml` (asset + one asset-clip per flagged moment, back to back on the spine, with markers), a `.docx` (narrative outline + short-form picks table, including the alternate title options considered), and a `.srt` (one caption block per Whisper segment, full transcript with timestamps).
 7. **Output** — all files are streamed to the browser as direct downloads; nothing is persisted server-side. Footage is check-box selectable rather than one "Run" button per file: check the videos you want (or use "Select all new" / "Select all"), then **"Run selected"** processes them sequentially. A single selected video behaves as before (its own `.docx`/`.fcpxml`/`.srt`). Selecting more than one **combines all of them into a single document set** instead of one per video: one `.docx` with every video's narrative sections (grouped and labeled by source) plus one combined short-form picks table, one `.fcpxml` timeline with every video as its own asset and every flagged clip from every video laid back-to-back in order (correctly handling source videos with different frame rates), and one `.srt` with each video's captions concatenated back-to-back as if they played consecutively.
 
@@ -112,6 +114,7 @@ app/
     pipeline/combine/route.ts     # merges several already-run videos' results into one docx/fcpxml
     pipeline/control/route.ts     # pause/resume/stop a running pipeline by jobId
     reference/parse/route.ts      # extracts text from an uploaded .docx reference document (mammoth)
+    reference/video/route.ts      # downloads + transcribes a reference video link (Drive, YouTube, etc.)
 components/
   Dashboard.tsx                   # all client-side UI + SSE consumption
 lib/
@@ -124,6 +127,8 @@ lib/
   brand-voice.ts                  # ABH system prompt
   llm.ts                          # provider-agnostic structured tool-use call (Groq or Claude)
   reference-material.ts           # shared prompt formatting for uploaded reference documents
+  reference-video.ts              # extracts a reference video link's transcript (Drive or yt-dlp)
+  ytdlp.ts                        # fetches/caches a standalone yt-dlp binary on first use
   narrative.ts / shortform.ts     # structured (tool-use) generations, via lib/llm.ts
   fcpxml.ts                       # frame-accurate FCPXML builder (single-video and multi-video/combined)
   docx-export.ts                  # docx builder

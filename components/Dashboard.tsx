@@ -239,6 +239,8 @@ export default function Dashboard() {
   const [driveLinkInput, setDriveLinkInput] = useState('');
   const [referenceDocs, setReferenceDocs] = useState<ReferenceDoc[]>([]);
   const [referenceUploadBusy, setReferenceUploadBusy] = useState(false);
+  const [referenceVideoUrl, setReferenceVideoUrl] = useState('');
+  const [referenceVideoBusy, setReferenceVideoBusy] = useState(false);
 
   const [runningFileId, setRunningFileId] = useState<string | null>(null);
   const [runningLabel, setRunningLabel] = useState('');
@@ -375,6 +377,32 @@ export default function Dashboard() {
 
   function removeReferenceDoc(filename: string) {
     setReferenceDocs((prev) => prev.filter((d) => d.filename !== filename));
+  }
+
+  async function handleAddReferenceVideo(e: React.FormEvent) {
+    e.preventDefault();
+    const url = referenceVideoUrl.trim();
+    if (!url) return;
+    setError(null);
+    setReferenceVideoBusy(true);
+    try {
+      const res = await fetch('/api/reference/video', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setError(data.error || 'Failed to process that video link.');
+        return;
+      }
+      setReferenceDocs((prev) => [...prev, { filename: data.title || url, text: data.text || '' }]);
+      setReferenceVideoUrl('');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to process that video link.');
+    } finally {
+      setReferenceVideoBusy(false);
+    }
   }
 
   function buildReferenceMaterial(): string | undefined {
@@ -741,6 +769,27 @@ export default function Dashboard() {
               disabled={referenceUploadBusy}
             />
             {referenceUploadBusy && <p className="muted">Reading file(s)...</p>}
+
+            <p className="muted" style={{ marginTop: 12, marginBottom: 4 }}>
+              Or add a video link (YouTube, Instagram, Google Drive, or most other sites) --
+              audio is extracted and transcribed the same way as your footage, and the transcript
+              is used as reference material. YouTube (public videos) is the most reliable; many
+              Instagram posts require a logged-in session this app doesn&apos;t have and will
+              fail with a clear error.
+            </p>
+            <form onSubmit={handleAddReferenceVideo}>
+              <input
+                type="text"
+                placeholder="https://www.youtube.com/watch?v=..."
+                value={referenceVideoUrl}
+                onChange={(e) => setReferenceVideoUrl(e.target.value)}
+                disabled={referenceVideoBusy}
+              />
+              <button type="submit" disabled={referenceVideoBusy || !referenceVideoUrl.trim()}>
+                {referenceVideoBusy ? 'Transcribing video...' : 'Add video'}
+              </button>
+            </form>
+
             {referenceDocs.length > 0 && (
               <div style={{ marginTop: 8 }}>
                 {referenceDocs.map((d) => (
