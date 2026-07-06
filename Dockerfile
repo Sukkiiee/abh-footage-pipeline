@@ -9,6 +9,12 @@
 # builds).
 FROM node:20-bookworm-slim
 
+# Suppresses debconf trying (and failing) to use an interactive Perl
+# prompt module that isn't in this slim image -- harmless on its own
+# ("Can't locate Term/ReadLine.pm"), but noisy, and this is the standard
+# fix for apt installs inside Docker.
+ENV DEBIAN_FRONTEND=noninteractive
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     ca-certificates \
