@@ -117,6 +117,42 @@ function estimateDurationSeconds(bytes: number): number | null {
   return bytes * secondsPerByte;
 }
 
+// Finished runs (including their .docx/.fcpxml/.srt as base64) persist here
+// so a page refresh doesn't wipe out work the user already paid transcription/
+// LLM time for. Capped at a modest count and defensively trimmed on quota
+// errors, since each entry can be a few hundred KB to a few MB.
+const RESULTS_HISTORY_KEY = 'abh_results_history';
+const MAX_RESULTS_ENTRIES = 15;
+
+function loadResultsHistory(): PipelineDone[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    return JSON.parse(window.localStorage.getItem(RESULTS_HISTORY_KEY) || '[]');
+  } catch {
+    return [];
+  }
+}
+
+function saveResultsHistory(results: PipelineDone[]) {
+  if (typeof window === 'undefined') return;
+  // Drop oldest entries first if we hit localStorage's quota (base64 media
+  // makes these entries large), rather than losing the newest work.
+  let toStore = results.slice(0, MAX_RESULTS_ENTRIES);
+  while (toStore.length > 0) {
+    try {
+      window.localStorage.setItem(RESULTS_HISTORY_KEY, JSON.stringify(toStore));
+      return;
+    } catch {
+      toStore = toStore.slice(0, -1);
+    }
+  }
+  try {
+    window.localStorage.removeItem(RESULTS_HISTORY_KEY);
+  } catch {
+    // best effort
+  }
+}
+
 function downloadBase64(filename: string, base64: string, mime: string) {
   const bytes = atob(base64);
   const buf = new Uint8Array(bytes.length);
@@ -253,8 +289,9 @@ export default function Dashboard() {
   const [runningLabel, setRunningLabel] = useState('');
   const [progressLog, setProgressLog] = useState<PipelineProgressEvent[]>([]);
   const [percent, setPercent] = useState(0);
-  const [results, setResults] = useState<PipelineDone[]>([]);
+  const [results, setResults] = useState<PipelineDone[]>(() => loadResultsHistory());
   const [expandedResult, setExpandedResult] = useState(0);
+  const [activeTab, setActiveTab] = useState<'pipeline' | 'history'>('pipeline');
   const [batchActive, setBatchActive] = useState(false);
   const [batchProgress, setBatchProgress] = useState<{ current: number; total: number } | null>(
     null
@@ -302,6 +339,12 @@ export default function Dashboard() {
     if (err) setError(err);
     refreshStatus();
   }, [refreshStatus]);
+
+  // Persist finished runs so a page refresh doesn't lose them -- the
+  // history tab (and this) is exactly what makes that durable.
+  useEffect(() => {
+    saveResultsHistory(results);
+  }, [results]);
 
   useEffect(() => {
     if (status?.connected && status.folderId) {
@@ -664,6 +707,23 @@ export default function Dashboard() {
     <>
       {error && <div className="error-banner">{error}</div>}
 
+      <div className="tab-bar">
+        <button
+          className={activeTab === 'pipeline' ? 'active' : ''}
+          onClick={() => setActiveTab('pipeline')}
+        >
+          Pipeline
+        </button>
+        <button
+          className={activeTab === 'history' ? 'active' : ''}
+          onClick={() => setActiveTab('history')}
+        >
+          History{results.length > 0 ? ` (${results.length})` : ''}
+        </button>
+      </div>
+
+      {activeTab === 'pipeline' && (
+      <>
       {!status.connected && (
         <div className="card">
           <h2><span className="step-badge">1</span>Connect Google Drive</h2>
@@ -1026,14 +1086,38 @@ export default function Dashboard() {
           ))}
         </div>
       )}
+      </>
+      )}
 
+      {activeTab === 'history' && (
+      <>
       {results.length > 0 && (
         <div className="card">
-          <h2>Results ({results.length})</h2>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', flexWrap: 'wrap', gap: 12 }}>
+            <h2 style={{ marginBottom: 0 }}>Past renders ({results.length})</h2>
+            <button
+              className="secondary"
+              onClick={() => {
+                if (window.confirm('Clear all saved renders? This cannot be undone.')) {
+                  setResults([]);
+                  setExpandedResult(0);
+                }
+              }}
+            >
+              Clear history
+            </button>
+          </div>
           <p className="muted">
-            Each finished video gets its own entry here, newest first. Click a title to
-            expand/collapse it.
+            Saved on this device so a page refresh doesn&apos;t lose your work. Newest first.
+            Click a title to expand/collapse it.
           </p>
+        </div>
+      )}
+
+      {results.length === 0 && (
+        <div className="card">
+          <h2>Past renders</h2>
+          <p className="muted">Nothing here yet. Finished runs from the Pipeline tab will show up here and stay saved across refreshes.</p>
         </div>
       )}
 
@@ -1164,6 +1248,8 @@ export default function Dashboard() {
           </div>
         );
       })}
+      </>
+      )}
     </>
   );
 }
