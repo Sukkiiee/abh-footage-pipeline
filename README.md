@@ -32,7 +32,7 @@ Progress streams live to the UI over SSE while the pipeline runs.
 
 ## Stack
 
-Next.js 14 (App Router) · googleapis · OpenAI SDK pointed at Groq's free-tier Whisper endpoint (transcription) · a provider-agnostic LLM layer defaulting to Groq's free-tier Llama models, switchable to Anthropic's Claude SDK via one env var (narrative + short-form generation) · fluent-ffmpeg + ffmpeg-static/ffprobe-static · `docx`. No database: the Google OAuth tokens and connected folder are stored in a single encrypted, httpOnly cookie. Whether a file has already been processed is tracked client-side (`localStorage`) so it survives across sessions in that browser.
+Next.js 14 (App Router) · googleapis · OpenAI SDK pointed at Groq's free-tier Whisper endpoint (transcription) · a provider-agnostic LLM layer defaulting to Groq's free-tier Llama models, switchable to Anthropic's Claude SDK via one env var (narrative + short-form generation) · fluent-ffmpeg + ffmpeg-static/@ffprobe-installer/ffprobe · `docx`. No database: the Google OAuth tokens and connected folder are stored in a single encrypted, httpOnly cookie. Whether a file has already been processed is tracked client-side (`localStorage`) so it survives across sessions in that browser.
 
 ## Setup
 

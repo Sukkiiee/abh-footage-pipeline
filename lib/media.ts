@@ -8,11 +8,16 @@ import { VideoMetadata } from './types';
 // entirely since its return type is `any`.
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const ffmpegStaticPath: string | null = require('ffmpeg-static');
+// `ffprobe-static` bundles an ffmpeg 4.0.2 binary from 2018 that reliably
+// segfaults (SIGSEGV) on modern container kernels, Render's included --
+// confirmed live in production. `@ffprobe-installer/ffprobe` is actively
+// maintained and ships a current build (matches ffmpeg-static's ffmpeg
+// version), which doesn't have this problem.
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const ffprobeStatic: { path: string } = require('ffprobe-static');
+const ffprobeInstaller: { path: string } = require('@ffprobe-installer/ffprobe');
 
 const resolvedFfmpegPath = ffmpegStaticPath || '/usr/bin/ffmpeg';
-const resolvedFfprobePath = ffprobeStatic.path || '/usr/bin/ffprobe';
+const resolvedFfprobePath = ffprobeInstaller.path || '/usr/bin/ffprobe';
 
 // Serverless filesystems sometimes extract node_modules with the exec bit
 // stripped; this is a harmless no-op if it's already executable.

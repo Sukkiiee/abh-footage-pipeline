@@ -6,19 +6,19 @@ const nextConfig = {
     serverComponentsExternalPackages: [
       'fluent-ffmpeg',
       'ffmpeg-static',
-      'ffprobe-static',
+      '@ffprobe-installer/ffprobe',
       'googleapis',
       'openai',
       '@anthropic-ai/sdk',
       'docx'
     ],
-    // Make sure the ffmpeg/ffprobe static binaries get traced into the
+    // Make sure the ffmpeg/ffprobe binaries get traced into the
     // Vercel serverless function output (they're loaded via fs paths, not
     // require(), so Next's default tracing can miss them otherwise).
     outputFileTracingIncludes: {
       'app/api/pipeline/run/route': [
         './node_modules/ffmpeg-static/**',
-        './node_modules/ffprobe-static/**'
+        './node_modules/@ffprobe-installer/**'
       ]
     }
   }
