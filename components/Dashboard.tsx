@@ -723,10 +723,7 @@ export default function Dashboard() {
               onChange={(e) => setTitleHint(e.target.value)}
             />
             <p className="muted" style={{ marginTop: -6 }}>
-              Keywords or an angle to steer title generation, not a fixed title. The pipeline
-              generates several title options for the long-form video (and for each short-form
-              clip) rather than settling on one; the strongest option is used by default for
-              exports/filenames, and every option is shown below once a run finishes.
+              Steers the title options generated below, not a fixed title.
             </p>
 
             <span className="field-label">Brief for this piece</span>
@@ -749,8 +746,7 @@ export default function Dashboard() {
               }}
             />
             <p className="muted" style={{ marginTop: -6 }}>
-              Passed to the narrative and short-form generation as producer context/angle. Leave
-              blank to let the footage speak for itself.
+              Optional producer context/angle. Leave blank to let the footage speak for itself.
             </p>
 
             <span className="field-label">Target video length (minutes, optional)</span>
@@ -764,17 +760,12 @@ export default function Dashboard() {
               style={{ maxWidth: 160 }}
             />
             <p className="muted" style={{ marginTop: -6 }}>
-              Guides how many narrative sections/beats get built and how tightly they&apos;re
-              paced, so the outline naturally fits roughly this runtime once cut. Doesn&apos;t
-              affect short-form clip length (always 15-60s).
+              Paces the long-form outline to roughly this runtime. Short-form clips stay 15-60s regardless.
             </p>
 
             <span className="field-label">Reference documents (optional)</span>
             <p className="muted" style={{ marginTop: 0 }}>
-              Upload other transcripts or scripts as style/soundbite guides -- the pipeline uses
-              them to calibrate what a strong moment looks like, never as facts about this
-              footage. Supports .txt, .md, and .docx (PDF isn&apos;t supported yet -- convert to
-              one of those first).
+              Style/soundbite guides, not facts about this footage. .txt, .md, .docx (no PDF yet).
             </p>
             <input
               type="file"
@@ -789,11 +780,7 @@ export default function Dashboard() {
             {referenceUploadBusy && <p className="muted">Reading file(s)...</p>}
 
             <p className="muted" style={{ marginTop: 12, marginBottom: 4 }}>
-              Or add a video link (YouTube, Instagram, Google Drive, or most other sites) --
-              audio is extracted and transcribed the same way as your footage, and the transcript
-              is used as reference material. YouTube (public videos) is the most reliable; many
-              Instagram posts require a logged-in session this app doesn&apos;t have and will
-              fail with a clear error.
+              Or add a video link (YouTube, Instagram, Drive, etc.) -- transcribed the same way as your footage. YouTube is most reliable.
             </p>
             <form onSubmit={handleAddReferenceVideo}>
               <input
