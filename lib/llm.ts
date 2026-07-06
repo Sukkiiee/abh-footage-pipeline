@@ -76,6 +76,27 @@ async function generateViaAnthropic(
   return toolUse.input;
 }
 
+// Groq's free tier enforces a tokens-per-minute (TPM) ceiling per model
+// (e.g. 12000 for llama-3.3-70b-versatile) that counts prompt tokens PLUS
+// the requested `max_tokens` completion budget against that ceiling up
+// front -- not just tokens actually generated. A long transcript (plus any
+// reference material/brief) can easily push prompt tokens high enough that
+// our default max_tokens completion budget tips the request over the
+// ceiling, even though the account isn't otherwise being hammered with
+// requests. Waiting and retrying the identical request would NOT help here
+// (unlike a genuine "too many requests" throttle) since the request alone
+// already exceeds the whole per-minute allowance -- the only fix is to
+// shrink what we're asking for. Groq's error message conveniently states
+// both the limit and what was requested, so we parse it and retry once
+// with just enough max_tokens trimmed off to fit.
+const GROQ_TPM_ERROR_PATTERN = /Limit (\d+).*?Requested (\d+)/is;
+
+function parseGroqTpmOverage(message: string): { limit: number; requested: number } | undefined {
+  const match = GROQ_TPM_ERROR_PATTERN.exec(message);
+  if (!match) return undefined;
+  return { limit: Number(match[1]), requested: Number(match[2]) };
+}
+
 async function generateViaGroq(
   systemPrompt: string,
   userPrompt: string,
@@ -89,28 +110,52 @@ async function generateViaGroq(
     baseURL: 'https://api.groq.com/openai/v1',
   });
 
-  const response = await client.chat.completions.create(
-    {
-      model,
-      max_tokens: maxTokens,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt },
-      ],
-      tools: [
-        {
-          type: 'function',
-          function: {
-            name: tool.name,
-            description: tool.description,
-            parameters: tool.schema,
+  async function callWithMaxTokens(effectiveMaxTokens: number) {
+    return client.chat.completions.create(
+      {
+        model,
+        max_tokens: effectiveMaxTokens,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+        tools: [
+          {
+            type: 'function',
+            function: {
+              name: tool.name,
+              description: tool.description,
+              parameters: tool.schema,
+            },
           },
-        },
-      ],
-      tool_choice: { type: 'function', function: { name: tool.name } },
-    },
-    { signal }
-  );
+        ],
+        tool_choice: { type: 'function', function: { name: tool.name } },
+      },
+      { signal }
+    );
+  }
+
+  let response;
+  try {
+    response = await callWithMaxTokens(maxTokens);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const overage = parseGroqTpmOverage(message);
+
+    if (!overage) throw err;
+
+    // Trim exactly the overage off max_tokens, plus a small safety margin
+    // for token-count estimation slop, but never trim below a floor small
+    // enough to still return a usable structured response.
+    const trimmedMaxTokens = maxTokens - (overage.requested - overage.limit) - 200;
+    if (trimmedMaxTokens < 1024) {
+      throw new Error(
+        `${message}\n\nThis transcript (plus any brief/reference material) is too large to fit even a reduced completion budget under Groq's free-tier rate limit for ${model}. Try a shorter reference-material upload, or switch LLM_PROVIDER to anthropic in your environment variables for larger requests.`
+      );
+    }
+
+    response = await callWithMaxTokens(trimmedMaxTokens);
+  }
 
   const toolCall = response.choices[0]?.message?.tool_calls?.[0];
   if (!toolCall || toolCall.type !== 'function') {
