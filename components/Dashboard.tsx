@@ -461,7 +461,9 @@ export default function Dashboard() {
 
       if (!res.ok || !res.body) {
         const data = await res.json().catch(() => ({}));
-        setError(data.error || `Pipeline failed to start (HTTP ${res.status}).`);
+        const fullMessage = `${target.displayName}: ${data.error || `Pipeline failed to start (HTTP ${res.status}).`}`;
+        setError(fullMessage);
+        opts?.onError?.(fullMessage);
         setRunningFileId(null);
         return;
       }
