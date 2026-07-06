@@ -83,7 +83,8 @@ Vercel's free (Hobby) tier caps serverless functions at well under a minute, whi
 
 1. Push this repo to GitHub.
 2. [render.com](https://render.com) → **New → Web Service** → connect the repo.
-3. Build command: `npm install && npm run build`. Start command: `npm run start` (already reads Render's injected `$PORT`).
+3. Build command: `apt-get update && apt-get install -y ffmpeg && npm install && npm run build`. Start command: `npm run start` (already reads Render's injected `$PORT`).
+   - The `apt-get install ffmpeg` part matters: the bundled static ffmpeg/ffprobe binaries (fine on most hosts) reliably crash with `SIGSEGV` in Render's sandboxed container -- confirmed in production. Installing ffmpeg via apt gives a build linked for that exact host, and the app automatically prefers it (`/usr/bin/ffmpeg`/`/usr/bin/ffprobe`) over the bundled ones when present.
 4. Add the same environment variables from `.env.local` under the service's **Environment** tab. You don't need to set `APP_URL` -- the app already falls back to Render's auto-injected `RENDER_EXTERNAL_URL`.
 5. Once deployed, go back to Google Cloud Console → your OAuth client → **Authorized redirect URIs** → add `https://your-app.onrender.com/api/auth/google/callback` (keep the `localhost:3000` one too, for local dev).
 6. Google Cloud Console → **OAuth consent screen → Test users** → add the Google account(s) of anyone besides you who should be able to connect Drive (see below).

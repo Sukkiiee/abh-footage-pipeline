@@ -8,19 +8,39 @@ import { VideoMetadata } from './types';
 // entirely since its return type is `any`.
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const ffmpegStaticPath: string | null = require('ffmpeg-static');
-// `ffprobe-static` bundles an ffmpeg 4.0.2 binary from 2018 that reliably
-// segfaults (SIGSEGV) on modern container kernels, Render's included --
-// confirmed live in production. `@ffprobe-installer/ffprobe` is actively
-// maintained and ships a current build (matches ffmpeg-static's ffmpeg
-// version), which doesn't have this problem.
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const ffprobeInstaller: { path: string } = require('@ffprobe-installer/ffprobe');
 
-const resolvedFfmpegPath = ffmpegStaticPath || '/usr/bin/ffmpeg';
-const resolvedFfprobePath = ffprobeInstaller.path || '/usr/bin/ffprobe';
+// Both `ffprobe-static`'s bundled 2018 binary AND `@ffprobe-installer`'s
+// current (2023) one segfault (SIGSEGV) on Render -- confirmed live in
+// production for both. Two different static builds crashing the same way
+// rules out "just an old binary" and points at something more fundamental:
+// Render's sandboxed container doesn't reliably run *statically linked*
+// ffmpeg/ffprobe binaries at all (a known class of issue on gVisor-style
+// sandboxes -- certain syscalls the static build makes aren't supported and
+// the kernel delivers SIGSEGV instead of a clean ENOSYS).
+//
+// The fix: prefer the system's own dynamically-linked ffmpeg/ffprobe
+// (installed via `apt-get install -y ffmpeg` in the Render build command --
+// see README) when present, since a package-manager build is compiled
+// against and linked for that exact host. Only fall back to the bundled
+// static binaries -- which work fine locally/on most other hosts -- when no
+// system install is found.
+function findSystemBinary(name: 'ffmpeg' | 'ffprobe'): string | undefined {
+  const candidates = [`/usr/bin/${name}`, `/usr/local/bin/${name}`];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return undefined;
+}
+
+const resolvedFfmpegPath = findSystemBinary('ffmpeg') || ffmpegStaticPath || '/usr/bin/ffmpeg';
+const resolvedFfprobePath = findSystemBinary('ffprobe') || ffprobeInstaller.path || '/usr/bin/ffprobe';
 
 // Serverless filesystems sometimes extract node_modules with the exec bit
-// stripped; this is a harmless no-op if it's already executable.
+// stripped; this is a harmless no-op if it's already executable (and for a
+// system binary that we didn't write ourselves, this may simply no-op with
+// a permission error, which is fine -- it's already executable).
 for (const bin of [resolvedFfmpegPath, resolvedFfprobePath]) {
   try {
     fs.chmodSync(bin, 0o755);
