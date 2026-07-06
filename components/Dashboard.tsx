@@ -25,6 +25,8 @@ interface ReferenceDoc {
 // to match so the client-side warning/truncation stays accurate.
 const MAX_REFERENCE_CHARS = 60000;
 
+const TARGET_LENGTH_PRESETS = ['1', '2', '3', '5', '10', '15', '20', '30'];
+
 interface PipelineDone {
   sourceFileName: string;
   narrative: NarrativeResult;
@@ -240,6 +242,7 @@ export default function Dashboard() {
   const [titleHint, setTitleHint] = useState('');
   const [brief, setBrief] = useState('');
   const [targetLengthMinutes, setTargetLengthMinutes] = useState('');
+  const [useCustomLength, setUseCustomLength] = useState(false);
   const [driveLinkInput, setDriveLinkInput] = useState('');
   const [referenceDocs, setReferenceDocs] = useState<ReferenceDoc[]>([]);
   const [referenceUploadBusy, setReferenceUploadBusy] = useState(false);
@@ -663,7 +666,7 @@ export default function Dashboard() {
 
       {!status.connected && (
         <div className="card">
-          <h2>Step 1 · Connect Google Drive</h2>
+          <h2><span className="step-badge">1</span>Connect Google Drive</h2>
           <p className="muted">
             Connect once. This app requests read-only access so it can list and download footage
             from a folder you choose.
@@ -676,7 +679,7 @@ export default function Dashboard() {
 
       {status.connected && !status.folderId && (
         <div className="card">
-          <h2>Step 2 · Connect a Drive folder</h2>
+          <h2><span className="step-badge">2</span>Connect a Drive folder</h2>
           <p className="muted">Paste the folder URL or ID that holds your raw footage.</p>
           <form onSubmit={submitFolder}>
             <input
@@ -750,16 +753,41 @@ export default function Dashboard() {
             </p>
 
             <span className="field-label">Target video length (minutes, optional)</span>
-            <input
-              type="number"
-              min={1}
-              step={1}
-              placeholder="e.g. 3"
-              value={targetLengthMinutes}
-              onChange={(e) => setTargetLengthMinutes(e.target.value)}
-              style={{ maxWidth: 160 }}
-            />
-            <p className="muted" style={{ marginTop: -6 }}>
+            <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+              <select
+                value={useCustomLength ? 'custom' : targetLengthMinutes || ''}
+                onChange={(e) => {
+                  if (e.target.value === 'custom') {
+                    setUseCustomLength(true);
+                    setTargetLengthMinutes('');
+                  } else {
+                    setUseCustomLength(false);
+                    setTargetLengthMinutes(e.target.value);
+                  }
+                }}
+                style={{ maxWidth: 200 }}
+              >
+                <option value="">No target (let it run naturally)</option>
+                {TARGET_LENGTH_PRESETS.map((m) => (
+                  <option key={m} value={m}>
+                    {m} minute{m === '1' ? '' : 's'}
+                  </option>
+                ))}
+                <option value="custom">Custom...</option>
+              </select>
+              {useCustomLength && (
+                <input
+                  type="number"
+                  min={1}
+                  step={1}
+                  placeholder="minutes"
+                  value={targetLengthMinutes}
+                  onChange={(e) => setTargetLengthMinutes(e.target.value)}
+                  style={{ maxWidth: 120, marginBottom: 0 }}
+                />
+              )}
+            </div>
+            <p className="muted" style={{ marginTop: 6 }}>
               Paces the long-form outline to roughly this runtime. Short-form clips stay 15-60s regardless.
             </p>
 
@@ -863,7 +891,9 @@ export default function Dashboard() {
                 style={{ marginBottom: 0, cursor: 'pointer' }}
                 onClick={() => setFootageListExpanded((v) => !v)}
               >
-                {footageListExpanded ? '▾' : '▸'} Step 3 · Footage{files ? ` (${files.length})` : ''}
+                <span className="step-badge">3</span>
+                <span className="chevron">{footageListExpanded ? '▾' : '▸'}</span>
+                Footage{files ? ` (${files.length})` : ''}
                 {selectedIds.size > 0 ? ` · ${selectedIds.size} selected` : ''}
               </h2>
               <button onClick={runSelected} disabled={isBusy || selectedIds.size === 0}>
@@ -881,7 +911,7 @@ export default function Dashboard() {
               per video. Click the heading above to collapse/expand the list.
             </p>
             {files && files.length > 0 && (
-              <div className="download-row" style={{ marginBottom: 8 }}>
+              <div className="segmented" style={{ marginBottom: 8 }}>
                 <button
                   className="secondary"
                   onClick={() => setSelectedIds(new Set(files.filter((f) => !processedMap[f.id]).map((f) => f.id)))}

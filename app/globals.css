@@ -114,7 +114,81 @@ header.app-header .tag {
   margin: 0 0 16px;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
+}
+
+.step-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, var(--accent-bright), var(--accent));
+  color: #1a1305;
+  font-size: 11px;
+  font-weight: 700;
+  flex-shrink: 0;
+  box-shadow: 0 1px 4px -1px rgba(226, 177, 60, 0.5);
+}
+
+.chevron {
+  color: var(--accent);
+  font-size: 12px;
+}
+
+/* Groups a row of related secondary buttons into one visually joined
+   control instead of separate floating buttons with gaps between them. */
+.segmented {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  width: fit-content;
+}
+
+.segmented button {
+  border-radius: 0;
+  border: none;
+  border-right: 1px solid var(--border);
+  background: var(--panel-3);
+}
+
+.segmented button:last-child {
+  border-right: none;
+}
+
+.segmented button:hover:not(:disabled) {
+  background: #262b36;
+}
+
+select {
+  width: 100%;
+  padding: 9px 32px 9px 12px;
+  background: var(--panel-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 14px;
+  font-family: inherit;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%239aa0ac' stroke-width='1.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+select:focus {
+  outline: none;
+  border-color: var(--accent-dim);
+  box-shadow: 0 0 0 3px rgba(226, 177, 60, 0.12);
+}
+
+select option {
+  background: var(--panel-2);
+  color: var(--text);
 }
 
 button {
