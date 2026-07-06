@@ -420,7 +420,7 @@ export default function Dashboard() {
 
   async function runPipeline(
     target: { fileId?: string; driveLink?: string; displayName: string; sizeBytes?: number },
-    opts?: { collect?: (data: PipelineDone) => void }
+    opts?: { collect?: (data: PipelineDone) => void; onError?: (message: string) => void }
   ) {
     setError(null);
     setProgressLog([]);
@@ -508,14 +508,16 @@ export default function Dashboard() {
               recordRunHistory(target.sizeBytes, (Date.now() - runStart) / 1000);
             }
           } else if (eventName === 'error') {
-            setError(
-              `${target.displayName}: ${data.message || 'Pipeline failed.'}`
-            );
+            const fullMessage = `${target.displayName}: ${data.message || 'Pipeline failed.'}`;
+            setError(fullMessage);
+            opts?.onError?.(fullMessage);
           }
         }
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Pipeline connection failed.');
+      const fullMessage = err instanceof Error ? err.message : 'Pipeline connection failed.';
+      setError(fullMessage);
+      opts?.onError?.(fullMessage);
     } finally {
       setRunningFileId(null);
       setCurrentJobId(null);
@@ -560,16 +562,16 @@ export default function Dashboard() {
 
     setBatchActive(true);
     const collected: PipelineDone[] = [];
+    const failures: string[] = [];
     try {
       for (let i = 0; i < toRun.length; i++) {
         setBatchProgress({ current: i + 1, total: toRun.length });
         await runPipeline(
           { fileId: toRun[i].id, displayName: toRun[i].name, sizeBytes: Number(toRun[i].size) || undefined },
-          { collect: (data) => collected.push(data) }
+          { collect: (data) => collected.push(data), onError: (message) => failures.push(message) }
         );
-        // A per-file failure surfaces via the error banner (runPipeline
-        // already prefixes it with the file name); keep going through the
-        // rest of the selection rather than losing everything already done.
+        // A per-file failure is recorded above; keep going through the rest
+        // of the selection rather than losing everything already done.
       }
     } finally {
       setBatchProgress(null);
@@ -577,7 +579,15 @@ export default function Dashboard() {
     }
 
     if (collected.length === 0) {
-      setError('None of the selected files finished successfully, so there is nothing to combine.');
+      // Show what actually went wrong for each file, not a generic
+      // one-liner -- the per-file error would otherwise get silently
+      // overwritten by whichever file failed last, then overwritten again
+      // by a summary message with no diagnostic value.
+      setError(
+        failures.length > 0
+          ? `None of the selected files finished successfully:\n${failures.map((f) => `- ${f}`).join('\n')}`
+          : 'None of the selected files finished successfully, so there is nothing to combine.'
+      );
       return;
     }
 

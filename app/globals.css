@@ -108,6 +108,9 @@ input[type='text'] {
   border-radius: 6px;
   margin-bottom: 16px;
   font-size: 14px;
+  /* Multi-file batch failures are joined with real "\n" characters; without
+     this, HTML collapses them into a single run-on line by default. */
+  white-space: pre-line;
 }
 
 .file-row {
