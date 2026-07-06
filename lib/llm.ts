@@ -142,12 +142,25 @@ async function generateViaGroq(
     const message = err instanceof Error ? err.message : String(err);
     const overage = parseGroqTpmOverage(message);
 
-    if (!overage) throw err;
+    // Only treat this as the specific "prompt + max_tokens exceeded the
+    // per-minute budget" case if the numbers actually describe an overage
+    // (requested > limit). Some other 413/429 shapes can coincidentally
+    // contain the words "Limit"/"Requested" for an unrelated quota (e.g. a
+    // daily cap, where "requested" can be smaller than "limit") -- blindly
+    // trusting the arithmetic there previously produced a *larger*,
+    // invalid max_tokens on retry that then broke on the model's own
+    // context-window ceiling instead. Also hard-clamp the trimmed value so
+    // it can never end up >= the original: trimming should only ever
+    // shrink the request, never grow it.
+    if (!overage || overage.requested <= overage.limit) throw err;
 
-    // Trim exactly the overage off max_tokens, plus a small safety margin
-    // for token-count estimation slop, but never trim below a floor small
+    // Trim the overage off max_tokens, plus a small safety margin for
+    // token-count estimation slop, but never trim below a floor small
     // enough to still return a usable structured response.
-    const trimmedMaxTokens = maxTokens - (overage.requested - overage.limit) - 200;
+    const trimmedMaxTokens = Math.min(
+      maxTokens - 200,
+      maxTokens - (overage.requested - overage.limit) - 200
+    );
     if (trimmedMaxTokens < 1024) {
       throw new Error(
         `${message}\n\nThis transcript (plus any brief/reference material) is too large to fit even a reduced completion budget under Groq's free-tier rate limit for ${model}. Try a shorter reference-material upload, or switch LLM_PROVIDER to anthropic in your environment variables for larger requests.`
