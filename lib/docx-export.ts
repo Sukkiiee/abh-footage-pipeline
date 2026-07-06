@@ -212,7 +212,10 @@ export async function buildNarrativeDocx(opts: DocxExportOptions): Promise<Buffe
             { label: 'Idea', text: clip.singleIdea },
             { label: 'Payoff', text: clip.payoff },
           ]),
-          bodyCell(clip.rationale),
+          multiLineCell([
+            { label: 'Rationale', text: clip.rationale },
+            ...(clip.counterCheck ? [{ label: 'Held up against', text: clip.counterCheck }] : []),
+          ]),
           multiLineCell([
             clip.suggestedCaption ? { text: `"${clip.suggestedCaption}"` } : { text: '' },
             clip.platformFit && clip.platformFit.length > 0

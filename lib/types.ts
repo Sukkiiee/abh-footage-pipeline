@@ -84,6 +84,8 @@ export interface ShortFormClip {
   singleIdea: string;
   payoff: string;
   rationale: string;
+  /** The model's own devil's-advocate check for why this clip could be rejected, and why it holds up anyway. Forces a second look at borderline clips instead of flagging on first pass. */
+  counterCheck?: string;
   suggestedCaption?: string;
   platformFit?: string[];
 }

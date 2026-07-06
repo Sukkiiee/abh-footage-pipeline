@@ -57,6 +57,11 @@ const SHORTFORM_TOOL = {
               description:
                 'Why this range is self-contained and works as a standalone clip: why here, why this long, why it needs no extra context.',
             },
+            counterCheck: {
+              type: 'string',
+              description:
+                'Play devil\'s advocate against your own pick before finalizing it: state the strongest reason a producer might reject this clip (weak hook, needs context, payoff is soft, idea is actually two ideas), then explain concretely why it holds up anyway. If you cannot give a real, specific answer, do not include this clip at all.',
+            },
             suggestedCaption: {
               type: 'string',
               description: 'A short suggested social caption, in ABH voice, no em dashes.',
@@ -67,7 +72,7 @@ const SHORTFORM_TOOL = {
               description: 'e.g. ["Instagram Reels", "TikTok", "LinkedIn", "YouTube Shorts"]',
             },
           },
-          required: ['titleOptions', 'startTimestamp', 'endTimestamp', 'hook', 'singleIdea', 'payoff', 'rationale'],
+          required: ['titleOptions', 'startTimestamp', 'endTimestamp', 'hook', 'singleIdea', 'payoff', 'rationale', 'counterCheck'],
         },
       },
     },
@@ -139,14 +144,15 @@ Below is the full timestamped transcript of the raw footage.
 ${transcriptText}
 ---TRANSCRIPT END---
 
-Flag every self-contained moment in this footage that would work as a standalone short-form social clip. Requirements for every clip you flag:
+Flag only moments in this footage that would genuinely work as a standalone short-form social clip. Be a harsh editor, not a generous one: most transcripts have zero to a handful of real candidates, not one every minute. Requirements for every clip you flag, all of them, no exceptions:
 - Between 15 and 60 seconds long.
-- A hook in the first 2 seconds: something is said or happens immediately that would stop a scroll. Do not flag a clip that needs 5+ seconds of setup before it gets interesting.
-- Built around a single idea. If a range covers two different points, either pick the stronger one or split it into two separate clip entries.
-- A clear payoff by the end: a punchline, a turn, a concrete number, a resolution. Not a clip that trails off or ends mid-thought.
-- Fully self-contained: a viewer with zero context on the rest of the footage understands and feels the whole thing.
+- A hook in the first 2 seconds: something is said or happens immediately that would stop a scroll. Reject anything that opens with scene-setting, an introduction, a throat-clear ("So basically what happened was..."), or a sentence that only makes sense once you already know the topic. If you have to explain the hook for it to land, it is not a hook.
+- Built around a single idea. If a range covers two different points, either pick the stronger one or split it into two separate clip entries. Do not stitch two half-ideas together to hit the length requirement.
+- A clear payoff by the end: a punchline, a turn, a concrete number, a resolution. Reject anything that trails off, ends mid-thought, or ends on setup for a point that was never actually delivered.
+- Fully self-contained: a viewer with zero context on the rest of the footage understands and feels the whole thing, immediately, with nothing explained to them separately (no caption doing the work the clip should be doing).
+- Before finalizing each clip, argue against it in the counterCheck field. If the honest answer is "this is actually kind of weak," leave it out. It is always better to return three strong clips than eight mediocre ones.
 
-Use exact timestamps from the transcript above for startTimestamp and endTimestamp. Do not flag overlapping clips. Return as many strong candidates as the footage actually supports; do not force weak ones in just to hit a number. For each clip, propose several distinct title options rather than settling on one. Use the submit_short_form_clips tool to return your result.`;
+Use exact timestamps from the transcript above for startTimestamp and endTimestamp. Do not flag overlapping clips. Return as many strong candidates as the footage actually supports, which may be very few or none; do not force weak ones in just to hit a number. For each clip, propose several distinct title options rather than settling on one. Use the submit_short_form_clips tool to return your result.`;
 
   const result = await generateStructuredJSON(
     ABH_BRAND_VOICE_SYSTEM_PROMPT,
@@ -215,6 +221,7 @@ Use exact timestamps from the transcript above for startTimestamp and endTimesta
       singleIdea: String(c.singleIdea || ''),
       payoff: String(c.payoff || ''),
       rationale: String(c.rationale || ''),
+      counterCheck: c.counterCheck ? String(c.counterCheck) : undefined,
       suggestedCaption: c.suggestedCaption ? String(c.suggestedCaption) : undefined,
       platformFit: Array.isArray(c.platformFit) ? (c.platformFit as string[]) : undefined,
     });
