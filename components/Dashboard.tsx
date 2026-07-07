@@ -33,12 +33,23 @@ interface PipelineDone {
   clips: ShortFormClip[];
   metadata?: VideoMetadata;
   rejectedClipCount: number;
-  docxBase64: string;
-  fcpxmlBase64: string;
-  srtBase64: string;
+  // Present for a run's lifetime in this browser session, and while it's
+  // still within the local history cap. Once history overflows, these get
+  // stripped after a successful upload to the Drive archive folder (see
+  // `archived` below) to keep localStorage usage bounded -- the actual
+  // files aren't lost, just no longer duplicated locally.
+  docxBase64?: string;
+  fcpxmlBase64?: string;
+  srtBase64?: string;
   docxFilename: string;
   fcpxmlFilename: string;
   srtFilename: string;
+  /** Set once this entry's files have been uploaded to the Drive archive folder, replacing the base64 fields above. */
+  archived?: {
+    docxLink?: string;
+    fcpxmlLink?: string;
+    srtLink?: string;
+  };
 }
 
 const PROCESSED_KEY = 'abh_processed_files';
@@ -135,9 +146,31 @@ function loadResultsHistory(): PipelineDone[] {
 
 function saveResultsHistory(results: PipelineDone[]) {
   if (typeof window === 'undefined') return;
-  // Drop oldest entries first if we hit localStorage's quota (base64 media
-  // makes these entries large), rather than losing the newest work.
-  let toStore = results.slice(0, MAX_RESULTS_ENTRIES);
+  // By the time this runs, archiveOverflowIfNeeded (below) has already
+  // uploaded anything past the cap to Drive and stripped its base64, so
+  // this should almost always fit. As an absolute last resort (Drive
+  // archiving failed, or wasn't possible because Drive isn't connected),
+  // strip base64 from the oldest entries -- losing the re-downloadable
+  // file but keeping the title/summary/clip metadata -- before ever
+  // deleting an entry outright.
+  let toStore = results;
+  while (true) {
+    try {
+      window.localStorage.setItem(RESULTS_HISTORY_KEY, JSON.stringify(toStore));
+      return;
+    } catch {
+      const strippable = toStore
+        .map((r, i) => ({ r, i }))
+        .reverse()
+        .find(({ r }) => r.docxBase64 || r.fcpxmlBase64 || r.srtBase64);
+      if (!strippable) break;
+      toStore = toStore.map((r, i) =>
+        i === strippable.i ? { ...r, docxBase64: undefined, fcpxmlBase64: undefined, srtBase64: undefined } : r
+      );
+    }
+  }
+  // Every entry has already been stripped and it still doesn't fit (an
+  // enormous number of runs) -- only now drop the oldest outright.
   while (toStore.length > 0) {
     try {
       window.localStorage.setItem(RESULTS_HISTORY_KEY, JSON.stringify(toStore));
@@ -151,6 +184,71 @@ function saveResultsHistory(results: PipelineDone[]) {
   } catch {
     // best effort
   }
+}
+
+/**
+ * Uploads any run older than MAX_RESULTS_ENTRIES (that still has its full
+ * base64 payload) to the Drive archive folder, replacing it with a
+ * lightweight stub (metadata + Drive links) once uploaded -- so history
+ * keeps growing indefinitely without indefinitely growing localStorage
+ * usage, and without ever silently deleting a past run's record. Returns
+ * null if there was nothing to do (the common case on every render).
+ */
+async function archiveOverflowIfNeeded(
+  results: PipelineDone[],
+  driveConnected: boolean
+): Promise<PipelineDone[] | null> {
+  const overflowIndexes = results
+    .map((r, i) => i)
+    .filter((i) => i >= MAX_RESULTS_ENTRIES && results[i].docxBase64 !== undefined);
+
+  if (overflowIndexes.length === 0) return null;
+
+  const next = [...results];
+  let changed = false;
+
+  for (const i of overflowIndexes) {
+    const entry = results[i];
+    if (!driveConnected) {
+      // Can't archive without Drive access -- strip now rather than
+      // waiting for saveResultsHistory's quota-triggered fallback to do
+      // the same thing later, so localStorage usage stays bounded
+      // proactively instead of only reactively.
+      next[i] = { ...entry, docxBase64: undefined, fcpxmlBase64: undefined, srtBase64: undefined };
+      changed = true;
+      continue;
+    }
+
+    try {
+      const res = await fetch('/api/pipeline/archive', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          docxFilename: entry.docxFilename,
+          docxBase64: entry.docxBase64,
+          fcpxmlFilename: entry.fcpxmlFilename,
+          fcpxmlBase64: entry.fcpxmlBase64,
+          srtFilename: entry.srtFilename,
+          srtBase64: entry.srtBase64,
+        }),
+      });
+      if (!res.ok) continue; // leave this entry as-is, retry on a later persist cycle
+      const data = await res.json();
+      next[i] = {
+        ...entry,
+        docxBase64: undefined,
+        fcpxmlBase64: undefined,
+        srtBase64: undefined,
+        archived: { docxLink: data.docxLink, fcpxmlLink: data.fcpxmlLink, srtLink: data.srtLink },
+      };
+      changed = true;
+    } catch {
+      // Network hiccup -- leave as-is, retry on a later persist cycle.
+      continue;
+    }
+  }
+
+  return changed ? next : null;
 }
 
 function downloadBase64(filename: string, base64: string, mime: string) {
@@ -341,10 +439,25 @@ export default function Dashboard() {
   }, [refreshStatus]);
 
   // Persist finished runs so a page refresh doesn't lose them -- the
-  // history tab (and this) is exactly what makes that durable.
+  // history tab (and this) is exactly what makes that durable. Before
+  // saving, archive anything past the local cap to Drive (if connected)
+  // so history can keep growing without indefinitely growing localStorage
+  // usage or ever silently deleting a past run.
   useEffect(() => {
-    saveResultsHistory(results);
-  }, [results]);
+    let cancelled = false;
+    (async () => {
+      const archived = await archiveOverflowIfNeeded(results, !!status?.connected);
+      if (cancelled) return;
+      if (archived) {
+        setResults(archived);
+      } else {
+        saveResultsHistory(results);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [results, status?.connected]);
 
   useEffect(() => {
     if (status?.connected && status.folderId) {
@@ -680,7 +793,10 @@ export default function Dashboard() {
         srtBase64: combineSrtToBase64(
           collected.map((c) => ({
             sourceFileName: c.sourceFileName,
-            srtBase64: c.srtBase64,
+            // These are always freshly-populated results straight from the
+            // SSE stream at this point in the flow (never a stripped/
+            // archived history entry), so this is safe.
+            srtBase64: c.srtBase64 || '',
             durationSec: c.metadata?.durationSec,
           }))
         ),
@@ -1152,32 +1268,52 @@ export default function Dashboard() {
                   </p>
                 )}
 
+                {result.archived && (
+                  <p className="muted" style={{ marginTop: -4 }}>
+                    This run's files were moved to your Drive&apos;s &quot;ABH Pipeline Archive&quot;
+                    folder to free up local space. The links below open them there.
+                  </p>
+                )}
                 <div className="download-row">
-                  <button
-                    onClick={() =>
-                      downloadBase64(
-                        result.docxFilename,
-                        result.docxBase64,
-                        'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-                      )
-                    }
-                  >
-                    Download .docx
-                  </button>
-                  <button
-                    onClick={() =>
-                      downloadBase64(result.fcpxmlFilename, result.fcpxmlBase64, 'application/xml')
-                    }
-                  >
-                    Download .fcpxml
-                  </button>
-                  <button
-                    onClick={() =>
-                      downloadBase64(result.srtFilename, result.srtBase64, 'application/x-subrip')
-                    }
-                  >
-                    Download .srt
-                  </button>
+                  {result.docxBase64 ? (
+                    <button
+                      onClick={() =>
+                        downloadBase64(
+                          result.docxFilename,
+                          result.docxBase64!,
+                          'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+                        )
+                      }
+                    >
+                      Download .docx
+                    </button>
+                  ) : result.archived?.docxLink ? (
+                    <a href={result.archived.docxLink} target="_blank" rel="noreferrer">
+                      <button className="secondary">Open .docx in Drive</button>
+                    </a>
+                  ) : null}
+                  {result.fcpxmlBase64 ? (
+                    <button
+                      onClick={() => downloadBase64(result.fcpxmlFilename, result.fcpxmlBase64!, 'application/xml')}
+                    >
+                      Download .fcpxml
+                    </button>
+                  ) : result.archived?.fcpxmlLink ? (
+                    <a href={result.archived.fcpxmlLink} target="_blank" rel="noreferrer">
+                      <button className="secondary">Open .fcpxml in Drive</button>
+                    </a>
+                  ) : null}
+                  {result.srtBase64 ? (
+                    <button
+                      onClick={() => downloadBase64(result.srtFilename, result.srtBase64!, 'application/x-subrip')}
+                    >
+                      Download .srt
+                    </button>
+                  ) : result.archived?.srtLink ? (
+                    <a href={result.archived.srtLink} target="_blank" rel="noreferrer">
+                      <button className="secondary">Open .srt in Drive</button>
+                    </a>
+                  ) : null}
                 </div>
 
                 <h3 style={{ marginTop: 24 }}>Narrative sections</h3>

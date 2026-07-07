@@ -45,7 +45,9 @@ Next.js 14 (App Router) · googleapis · OpenAI SDK pointed at Groq's free-tier 
    - Authorized redirect URI: `http://localhost:3000/api/auth/google/callback` for local dev, plus your production URL's equivalent, e.g. `https://your-app.vercel.app/api/auth/google/callback`.
 5. Copy the client ID/secret into `.env.local` (see below).
 
-The app requests `drive.readonly`, not the narrower `drive.file` scope. `drive.file` would only let it see files it created itself; since it needs to read arbitrary existing footage in a folder you pick, it needs read access to your Drive. It never requests write access.
+The app requests two scopes: `drive.readonly` (to read arbitrary existing footage in a folder you pick) and `drive.file` (so it can create its own files -- specifically, archiving old run history to a Drive folder it manages once local browser storage fills up, rather than deleting that history; see "Run history" below). `drive.file` only grants access to files the app itself creates, not your wider Drive.
+
+If you connected before `drive.file` was added, you'll need to reconnect once (**Disconnect** then **Connect Google Drive** again) -- Google requires re-consent whenever a connected app's scopes change, there's no way around that with an existing session's tokens.
 
 ### 2. API keys
 
@@ -123,6 +125,7 @@ This already supports multiple people without any code changes: each visitor get
 - **Pause/Stop take effect at safe checkpoints, not instantly mid-operation.** You can pause/stop between pipeline stages, and between individual Whisper chunk uploads during transcription (the usual bottleneck for long footage) -- but not, say, half a second into a single ffmpeg audio extraction. Stop does actively kill the running ffmpeg process and abort any in-flight Groq/Claude request rather than just giving up on listening, so it does save real time/cost, just not with zero latency.
 - **Pause/Stop use an in-memory job registry (`lib/job-control.ts`), not a database.** This works reliably locally and on a single serverless instance, since the control request and the running pipeline request share the same process. It is *not* guaranteed if a deployment scales to multiple concurrent serverless instances -- a pause/stop request could land on a different instance than the one running the job and silently no-op. Full production robustness for that case would need a shared store (e.g. Vercel KV) instead of in-memory state.
 - **Time estimates are learned from your own past runs, not a guessed constant.** They're based on a simple bytes-processed-per-second average across runs completed on this machine (stored in `localStorage`), so there's no estimate until at least one run has finished, and accuracy improves as you use it more.
+- **Run history lives in `localStorage`, on this browser/device only.** The History tab won't show past runs from a different browser or machine. It's capped at 15 full entries; older ones are automatically uploaded to a Drive folder named "ABH Pipeline Archive" (created on first use) and replaced locally with just a link, so history keeps growing without growing `localStorage` usage indefinitely. If Drive isn't connected when that cap is hit, the oldest entries are stripped of their re-downloadable files (keeping just the title/summary/clip metadata) instead.
 
 ## Project structure
 

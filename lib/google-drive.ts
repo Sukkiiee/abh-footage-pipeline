@@ -1,14 +1,31 @@
 import { google, drive_v3 } from 'googleapis';
 import { OAuth2Client, Credentials } from 'google-auth-library';
 import { NextRequest } from 'next/server';
+import { Readable } from 'stream';
 import { config } from './config';
 import { GoogleTokens, DriveVideoFile, SessionData } from './types';
 import { readSession } from './session';
 
-// Read-only is required because we need to list & download arbitrary
+// drive.readonly is required because we need to list & download arbitrary
 // existing footage in a folder the user picks, not just files this app
-// creates itself (which is all the narrower drive.file scope would allow).
-export const OAUTH_SCOPES = ['https://www.googleapis.com/auth/drive.readonly'];
+// creates itself. drive.file is added on top of that (not instead of it)
+// so the app can also *create* files of its own -- specifically, archiving
+// old run history (docx/fcpxml/srt) to a Drive folder it manages once
+// local browser storage fills up, rather than deleting that history.
+// drive.file only grants access to files the app itself created, so it
+// can't read/write anything else in the user's Drive beyond what
+// drive.readonly already separately allows for browsing footage.
+//
+// Anyone who connected before this scope was added needs to reconnect
+// once (Google requires re-consent for a broadened scope) -- there's no
+// way around that with an existing session's tokens.
+export const OAUTH_SCOPES = [
+  'https://www.googleapis.com/auth/drive.readonly',
+  'https://www.googleapis.com/auth/drive.file',
+];
+
+/** Name of the Drive folder (created on first use, then reused) that archived run history is uploaded into. */
+export const ARCHIVE_FOLDER_NAME = 'ABH Pipeline Archive';
 
 export const VIDEO_MIME_TYPES = ['video/mp4', 'video/quicktime'];
 
@@ -310,6 +327,72 @@ export async function getFileMetadata(
 export function getDriveMediaUrl(fileId: string): string {
   const params = new URLSearchParams({ alt: 'media', supportsAllDrives: 'true' });
   return `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?${params.toString()}`;
+}
+
+/**
+ * Finds the app's archive folder (by name, at Drive's root) if it already
+ * exists from a previous archive, or creates it. Since this app only has
+ * drive.file access to files it creates itself, it can't rely on searching
+ * by folder path elsewhere in the user's Drive -- this folder is entirely
+ * the app's own, separate from whatever footage folder the user connected.
+ */
+export async function ensureArchiveFolder(drive: drive_v3.Drive): Promise<string> {
+  const existing = await drive.files.list({
+    q: `name='${ARCHIVE_FOLDER_NAME}' and mimeType='application/vnd.google-apps.folder' and trashed = false and 'root' in parents`,
+    fields: 'files(id, name)',
+    pageSize: 1,
+    spaces: 'drive',
+  });
+
+  const found = existing.data.files?.[0]?.id;
+  if (found) return found;
+
+  const created = await drive.files.create({
+    requestBody: {
+      name: ARCHIVE_FOLDER_NAME,
+      mimeType: 'application/vnd.google-apps.folder',
+    },
+    fields: 'id',
+  });
+
+  if (!created.data.id) {
+    throw new Error('Could not create the Drive archive folder.');
+  }
+  return created.data.id;
+}
+
+/**
+ * Uploads one base64-encoded file (a generated .docx/.fcpxml/.srt) into the
+ * archive folder and returns a link the user can open later to re-download
+ * it. Because this only uses drive.file scope, the resulting file is
+ * visible to the user in "My Drive" (Google always surfaces drive.file
+ * uploads there) but not otherwise readable by this app beyond what it
+ * itself just created.
+ */
+export async function uploadArchiveFile(
+  drive: drive_v3.Drive,
+  folderId: string,
+  filename: string,
+  base64Data: string,
+  mimeType: string
+): Promise<{ id: string; webViewLink: string }> {
+  const buffer = Buffer.from(base64Data, 'base64');
+  const res = await drive.files.create({
+    requestBody: {
+      name: filename,
+      parents: [folderId],
+    },
+    media: {
+      mimeType,
+      body: Readable.from(buffer),
+    },
+    fields: 'id, webViewLink',
+  });
+
+  if (!res.data.id) {
+    throw new Error(`Upload of "${filename}" to Drive did not return a file id.`);
+  }
+  return { id: res.data.id, webViewLink: res.data.webViewLink || `https://drive.google.com/file/d/${res.data.id}/view` };
 }
 
 export class NotConnectedError extends Error {
