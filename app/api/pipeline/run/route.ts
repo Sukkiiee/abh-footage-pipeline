@@ -21,6 +21,7 @@ import { buildSrt } from '@/lib/srt';
 import { writeSession } from '@/lib/session';
 import { config } from '@/lib/config';
 import { createJob, removeJob, checkpoint, getJobSignal } from '@/lib/job-control';
+import { SseController } from '@/lib/sse';
 
 // This route runs the entire pipeline (download -> ffmpeg -> Whisper ->
 // Claude x2 -> exports) inside a single request/response cycle, streaming
@@ -32,6 +33,32 @@ export const maxDuration = 800;
 
 function sanitizeFileName(name: string): string {
   return name.replace(/[/\\?%*:|"<>]/g, '_');
+}
+
+// Confirmed in production: a large enough source file (15GB+) made a run
+// fail completely silently -- the connection dropped mid-step with no SSE
+// 'error' event ever sent, because nothing server-side got the chance to
+// send one. The likely cause: probing/extracting audio from a huge remote
+// file over HTTP can run for minutes with zero bytes written to the
+// response in between, and a proxy/load balancer in front of the app
+// (Render's included) can treat that as an idle connection and kill it.
+// Sending a lightweight heartbeat progress event on an interval during
+// exactly those two long, silent, network-bound steps keeps the response
+// actively flowing so it isn't mistaken for idle.
+function withHeartbeat<T>(
+  sse: SseController,
+  stage: string,
+  message: string,
+  percent: number,
+  work: Promise<T>
+): Promise<T> {
+  const startedAt = Date.now();
+  const interval = setInterval(() => {
+    const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
+    sse.send('progress', { stage, message: `${message} (still working, ${elapsedSec}s elapsed)`, percent });
+  }, 15_000);
+
+  return work.finally(() => clearInterval(interval));
 }
 
 export async function POST(req: NextRequest) {
@@ -135,22 +162,16 @@ export async function POST(req: NextRequest) {
         headers: { Authorization: `Bearer ${accessToken}` },
       };
 
-      sse.send('progress', {
-        stage: 'probe',
-        message: 'Reading video metadata directly from Drive (duration, frame rate, resolution)...',
-        percent: 15,
-      });
-      const metadata = await probeVideo(remoteSource);
+      const probeMessage = 'Reading video metadata directly from Drive (duration, frame rate, resolution)...';
+      sse.send('progress', { stage: 'probe', message: probeMessage, percent: 15 });
+      const metadata = await withHeartbeat(sse, 'probe', probeMessage, 15, probeVideo(remoteSource));
       metadata.fileName = fileMeta.name;
 
       if (jobId) await checkpoint(jobId);
-      sse.send('progress', {
-        stage: 'audio',
-        message: 'Streaming audio track from Drive (no local video download)...',
-        percent: 30,
-      });
+      const audioMessage = 'Streaming audio track from Drive (no local video download)...';
+      sse.send('progress', { stage: 'audio', message: audioMessage, percent: 30 });
       const audioPath = path.join(workDir, 'audio.mp3');
-      await extractAudio(remoteSource, audioPath, signal);
+      await withHeartbeat(sse, 'audio', audioMessage, 30, extractAudio(remoteSource, audioPath, signal));
 
       if (jobId) await checkpoint(jobId);
       sse.send('progress', {

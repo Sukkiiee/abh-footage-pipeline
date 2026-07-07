@@ -696,6 +696,13 @@ export default function Dashboard() {
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
+      // If the connection drops (a proxy/idle timeout, the server process
+      // crashing, etc. -- confirmed happening on Render's free tier against
+      // a 15GB file) the stream just closes with no 'error' SSE event ever
+      // sent, since nothing server-side got the chance to send one. Without
+      // this flag, that looked like nothing happened at all: the loop below
+      // would simply exit and the run would silently reset to idle.
+      let receivedTerminalEvent = false;
 
       // eslint-disable-next-line no-constant-condition
       while (true) {
@@ -724,6 +731,7 @@ export default function Dashboard() {
               setLiveTranscriptLines(progressEvent.transcriptLines);
             }
           } else if (eventName === 'done') {
+            receivedTerminalEvent = true;
             // completedAt/runtimeSec aren't sent by the server -- attached
             // here, once, from this client's own clock, so every result
             // (single run or one collected into a batch/combine) carries
@@ -749,14 +757,21 @@ export default function Dashboard() {
               recordRunHistory(target.sizeBytes, (Date.now() - runStart) / 1000);
             }
           } else if (eventName === 'error') {
+            receivedTerminalEvent = true;
             const fullMessage = `${target.displayName}: ${data.message || 'Pipeline failed.'}`;
             setError(fullMessage);
             opts?.onError?.(fullMessage);
           }
         }
       }
+
+      if (!receivedTerminalEvent) {
+        const fullMessage = `${target.displayName}: Connection closed before the pipeline finished. This can happen with very large files (a proxy or server timeout can drop a long-running connection) -- try again, or with a smaller/trimmed file if it keeps happening on this one.`;
+        setError(fullMessage);
+        opts?.onError?.(fullMessage);
+      }
     } catch (err) {
-      const fullMessage = err instanceof Error ? err.message : 'Pipeline connection failed.';
+      const fullMessage = `${target.displayName}: ${err instanceof Error ? err.message : 'Pipeline connection failed.'}`;
       setError(fullMessage);
       opts?.onError?.(fullMessage);
     } finally {
