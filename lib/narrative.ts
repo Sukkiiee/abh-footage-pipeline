@@ -87,6 +87,31 @@ const NARRATIVE_SECTIONS_TOOL = {
   },
 };
 
+// Used only for chunkedGenerateNarrative's finalize step, which builds
+// title/logline/themes/closingLine from an already-built outline, not the
+// sections themselves (those come from generateSectionsForChunk instead).
+// A real, separate schema rather than reusing NARRATIVE_TOOL with a
+// "sections can be left empty" instruction: the full tool's schema still
+// marks 'sections' required, so a model that (correctly) followed that
+// instruction and omitted the field entirely failed Groq's own schema
+// validation with a 400 -- confirmed in production. Not including the
+// field in this schema at all removes the contradiction outright.
+const NARRATIVE_FINALIZE_TOOL_NAME = 'submit_narrative_finalize';
+const NARRATIVE_FINALIZE_TOOL = {
+  name: NARRATIVE_FINALIZE_TOOL_NAME,
+  description: 'Submit the title options, logline, themes, and closing line for a narrative outline already built from a longer transcript.',
+  schema: {
+    type: 'object' as const,
+    properties: {
+      titleOptions: NARRATIVE_TOOL.schema.properties.titleOptions,
+      logline: NARRATIVE_TOOL.schema.properties.logline,
+      themes: NARRATIVE_TOOL.schema.properties.themes,
+      closingLine: NARRATIVE_TOOL.schema.properties.closingLine,
+    },
+    required: ['titleOptions', 'logline'],
+  },
+};
+
 export interface NarrativeOptions {
   /** Free-text producer/editorial brief -- context, angle, or instructions for this specific piece. */
   brief?: string;
@@ -256,15 +281,15 @@ Below is the narrative outline already built for this footage (section headings 
 ${outline}
 ---OUTLINE END---
 
-Based on this outline, propose title options, a one-sentence logline, 2-5 theme labels, and an optional closing line, all in the ABH brand voice. Use the submit_narrative tool to return your result (the "sections" field can be left empty; it's already built separately).`;
+Based on this outline, propose title options, a one-sentence logline, 2-5 theme labels, and an optional closing line, all in the ABH brand voice. Use the submit_narrative_finalize tool to return your result.`;
 
   const raw = (await generateStructuredJSON(
     ABH_BRAND_VOICE_SYSTEM_PROMPT,
     userPrompt,
     {
-      name: NARRATIVE_TOOL.name,
-      description: NARRATIVE_TOOL.description,
-      schema: NARRATIVE_TOOL.schema,
+      name: NARRATIVE_FINALIZE_TOOL.name,
+      description: NARRATIVE_FINALIZE_TOOL.description,
+      schema: NARRATIVE_FINALIZE_TOOL.schema,
     },
     {
       anthropicModel: config.anthropicNarrativeModel,
