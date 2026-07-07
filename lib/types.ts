@@ -24,6 +24,10 @@ export interface DriveVideoFile {
   webViewLink?: string;
   /** Path of subfolder names (not including the connected root) this file was found under, if listing was recursive. e.g. "Round 2/Semifinals" */
   folderPath?: string;
+  /** 'drive' (the default -- omitted on existing Drive listings) or 'local', for footage read directly off the disk of the machine this app is running on rather than from Google Drive. */
+  source?: 'drive' | 'local';
+  /** Only set when source is 'local': the absolute path on disk, fed directly to ffmpeg (no Drive involved at all for this file). */
+  localPath?: string;
 }
 
 export interface TranscriptSegment {

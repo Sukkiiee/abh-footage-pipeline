@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
-import { createSseStream, SSE_HEADERS } from '@/lib/sse';
+import { createSseStream, SSE_HEADERS, SseController } from '@/lib/sse';
 import {
   requireDrive,
   getFileMetadata,
@@ -11,7 +11,7 @@ import {
   VIDEO_MIME_TYPES,
   NotConnectedError,
 } from '@/lib/google-drive';
-import { probeVideo, extractAudio, chunkAudioIfNeeded } from '@/lib/media';
+import { VideoSource, probeVideo, extractAudio, chunkAudioIfNeeded } from '@/lib/media';
 import { transcribeChunks, formatTimestamp } from '@/lib/whisper';
 import { generateNarrative } from '@/lib/narrative';
 import { extractShortFormClips } from '@/lib/shortform';
@@ -21,7 +21,7 @@ import { buildSrt } from '@/lib/srt';
 import { writeSession } from '@/lib/session';
 import { config } from '@/lib/config';
 import { createJob, removeJob, checkpoint, getJobSignal } from '@/lib/job-control';
-import { SseController } from '@/lib/sse';
+import { SessionData } from '@/lib/types';
 
 // This route runs the entire pipeline (download -> ffmpeg -> Whisper ->
 // Claude x2 -> exports) inside a single request/response cycle, streaming
@@ -63,6 +63,7 @@ function withHeartbeat<T>(
 
 export async function POST(req: NextRequest) {
   let fileId = '';
+  let localSourcePath = '';
   let localMediaPath: string | undefined;
   let brief: string | undefined;
   let titleHint: string | undefined;
@@ -73,11 +74,13 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
 
-    // Either a fileId (from the connected-folder file list) or a pasted
-    // Drive share link for a specific video works here -- access is
-    // governed entirely by what the connected Drive account can see, not
-    // by which folder the file happens to live in.
-    if (body.fileId) {
+    // Three ways to point at a source video: a fileId (from the connected-
+    // folder file list), a pasted Drive share link, or a local disk path
+    // (footage read directly off the machine running this app, no Drive
+    // involved at all -- see lib/local-files.ts).
+    if (body.localPath) {
+      localSourcePath = String(body.localPath);
+    } else if (body.fileId) {
       fileId = String(body.fileId);
     } else if (body.driveLink) {
       fileId = extractFileId(String(body.driveLink));
@@ -99,29 +102,52 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Invalid JSON body.' }, { status: 400 });
   }
 
-  if (!fileId) {
+  if (!fileId && !localSourcePath) {
     return NextResponse.json(
-      { error: 'Provide a fileId or a Drive video link.' },
+      { error: 'Provide a fileId, a Drive video link, or a local file path.' },
       { status: 400 }
     );
   }
 
-  let authCtx;
-  try {
-    authCtx = await requireDrive(req);
-  } catch (err) {
-    const status = err instanceof NotConnectedError ? 401 : 500;
+  if (localSourcePath && !config.localFootageEnabled) {
     return NextResponse.json(
-      { error: err instanceof Error ? err.message : 'Authorization error.' },
-      { status }
+      {
+        error:
+          'Local footage is disabled on this deployment. Set ENABLE_LOCAL_FOOTAGE=true in your environment (only appropriate when running this app on your own machine) to turn it on.',
+      },
+      { status: 403 }
     );
   }
 
-  const { drive, session, accessToken } = authCtx;
+  // A local-source run needs no Drive access at all -- skip the whole auth
+  // gate rather than forcing an unrelated Drive connection just to process
+  // a file that never touches Drive.
+  let session: SessionData | undefined;
+  let accessToken: string | undefined;
+  let finalizeTokens: (() => ReturnType<Awaited<ReturnType<typeof requireDrive>>['finalizeTokens']>) | undefined;
+  let drive: Awaited<ReturnType<typeof requireDrive>>['drive'] | undefined;
+
+  if (!localSourcePath) {
+    let authCtx;
+    try {
+      authCtx = await requireDrive(req);
+    } catch (err) {
+      const status = err instanceof NotConnectedError ? 401 : 500;
+      return NextResponse.json(
+        { error: err instanceof Error ? err.message : 'Authorization error.' },
+        { status }
+      );
+    }
+    drive = authCtx.drive;
+    session = authCtx.session;
+    accessToken = authCtx.accessToken;
+    finalizeTokens = authCtx.finalizeTokens;
+  }
+
   // Resolved once, up front: any refresh_token rotation Google decides to do
   // mid-pipeline (very unlikely inside a token's ~1hr lifetime) won't be
   // persisted, but the proactive refresh that already happened will be.
-  const refreshedTokens = authCtx.finalizeTokens();
+  const refreshedTokens = finalizeTokens ? finalizeTokens() : null;
 
   // Only tracked (pausable/stoppable) if the client sent a jobId; older or
   // ad-hoc callers without one just run straight through, uninterruptible.
@@ -132,43 +158,74 @@ export async function POST(req: NextRequest) {
     const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'abh-'));
 
     try {
-      if (jobId) await checkpoint(jobId);
-      sse.send('progress', {
-        stage: 'metadata',
-        message: 'Fetching file metadata from Drive...',
-        percent: 2,
-      });
-      const fileMeta = await getFileMetadata(drive, fileId);
+      let sourceFileName: string;
+      let remoteSource: VideoSource;
 
-      if (!VIDEO_MIME_TYPES.includes(fileMeta.mimeType)) {
-        throw new Error(
-          `"${fileMeta.name}" isn't an .mp4/.mov file (got ${fileMeta.mimeType || 'unknown type'}). Check the link points to the right file.`
-        );
+      if (localSourcePath) {
+        if (jobId) await checkpoint(jobId);
+        sse.send('progress', { stage: 'metadata', message: 'Checking local file...', percent: 2 });
+
+        const stat = await fs.promises.stat(localSourcePath).catch(() => null);
+        if (!stat || !stat.isFile()) {
+          throw new Error(
+            `"${localSourcePath}" isn't a file this server process can see. Local footage is read directly off the disk of the machine running this app.`
+          );
+        }
+        const ext = path.extname(localSourcePath).toLowerCase();
+        if (ext !== '.mp4' && ext !== '.mov') {
+          throw new Error(`"${localSourcePath}" isn't an .mp4/.mov file.`);
+        }
+
+        sourceFileName = path.basename(localSourcePath);
+        remoteSource = localSourcePath;
+        // No maxSourceFileGB check here: that cap exists for network-
+        // streamed Drive sources under a hosted deployment's time/proxy
+        // constraints, neither of which applies to a local file being read
+        // straight off disk by a process running on the same machine.
+      } else {
+        sse.send('progress', {
+          stage: 'metadata',
+          message: 'Fetching file metadata from Drive...',
+          percent: 2,
+        });
+        const fileMeta = await getFileMetadata(drive!, fileId);
+
+        if (!VIDEO_MIME_TYPES.includes(fileMeta.mimeType)) {
+          throw new Error(
+            `"${fileMeta.name}" isn't an .mp4/.mov file (got ${fileMeta.mimeType || 'unknown type'}). Check the link points to the right file.`
+          );
+        }
+
+        const maxSourceBytes = config.maxSourceFileGB * 1024 * 1024 * 1024;
+        if (fileMeta.size && Number(fileMeta.size) > maxSourceBytes) {
+          throw new Error(
+            `Source file is ${(Number(fileMeta.size) / 1e9).toFixed(1)}GB, which is over the current MAX_SOURCE_FILE_GB limit (${config.maxSourceFileGB}GB). Raise MAX_SOURCE_FILE_GB in .env.local or use a shorter export.`
+          );
+        }
+
+        sourceFileName = fileMeta.name;
+        // ffmpeg reads directly from Drive over HTTP (with an auth header)
+        // -- the source video is never downloaded to local/serverless
+        // disk. ffmpeg's own HTTP client handles the range-request seeking
+        // a video container needs, including files with trailing metadata
+        // atoms.
+        remoteSource = {
+          url: getDriveMediaUrl(fileId),
+          headers: { Authorization: `Bearer ${accessToken}` },
+        };
       }
 
-      const maxSourceBytes = config.maxSourceFileGB * 1024 * 1024 * 1024;
-      if (fileMeta.size && Number(fileMeta.size) > maxSourceBytes) {
-        throw new Error(
-          `Source file is ${(Number(fileMeta.size) / 1e9).toFixed(1)}GB, which is over the current MAX_SOURCE_FILE_GB limit (${config.maxSourceFileGB}GB). Raise MAX_SOURCE_FILE_GB in .env.local or use a shorter export.`
-        );
-      }
-
-      // ffmpeg reads directly from Drive over HTTP (with an auth header) --
-      // the source video is never downloaded to local/serverless disk.
-      // ffmpeg's own HTTP client handles the range-request seeking a video
-      // container needs, including files with trailing metadata atoms.
-      const remoteSource = {
-        url: getDriveMediaUrl(fileId),
-        headers: { Authorization: `Bearer ${accessToken}` },
-      };
-
-      const probeMessage = 'Reading video metadata directly from Drive (duration, frame rate, resolution)...';
+      const probeMessage = localSourcePath
+        ? 'Reading local video metadata (duration, frame rate, resolution)...'
+        : 'Reading video metadata directly from Drive (duration, frame rate, resolution)...';
       sse.send('progress', { stage: 'probe', message: probeMessage, percent: 15 });
       const metadata = await withHeartbeat(sse, 'probe', probeMessage, 15, probeVideo(remoteSource));
-      metadata.fileName = fileMeta.name;
+      metadata.fileName = sourceFileName;
 
       if (jobId) await checkpoint(jobId);
-      const audioMessage = 'Streaming audio track from Drive (no local video download)...';
+      const audioMessage = localSourcePath
+        ? 'Extracting audio from local file...'
+        : 'Streaming audio track from Drive (no local video download)...';
       sse.send('progress', { stage: 'audio', message: audioMessage, percent: 30 });
       const audioPath = path.join(workDir, 'audio.mp3');
       await withHeartbeat(sse, 'audio', audioMessage, 30, extractAudio(remoteSource, audioPath, signal));
@@ -221,7 +278,7 @@ export async function POST(req: NextRequest) {
         message: 'Generating long-form narrative (ABH brand voice)...',
         percent: 60,
       });
-      const narrative = await generateNarrative(transcript, fileMeta.name, {
+      const narrative = await generateNarrative(transcript, sourceFileName, {
         brief,
         targetLengthMinutes,
         titleHint,
@@ -237,7 +294,7 @@ export async function POST(req: NextRequest) {
       });
       // Pass the model's own top-pick long-form title (not the raw hint) so
       // clip titles read as part of the same series once one's been chosen.
-      const { clips, rejected } = await extractShortFormClips(transcript, fileMeta.name, {
+      const { clips, rejected } = await extractShortFormClips(transcript, sourceFileName, {
         brief,
         videoTitle: narrative.title,
         referenceMaterial,
@@ -252,10 +309,10 @@ export async function POST(req: NextRequest) {
       });
 
       const mediaPath =
-        localMediaPath || path.posix.join(config.defaultLocalMediaDir, fileMeta.name);
+        localMediaPath || localSourcePath || path.posix.join(config.defaultLocalMediaDir, sourceFileName);
 
       const fcpxmlString = buildFcpxml({
-        sourceFileName: fileMeta.name,
+        sourceFileName,
         localMediaPath: mediaPath,
         metadata,
         clips,
@@ -263,7 +320,7 @@ export async function POST(req: NextRequest) {
       });
 
       const docxBuffer = await buildNarrativeDocx({
-        sourceFileName: fileMeta.name,
+        sourceFileName,
         narrative,
         clips,
         generatedAt: new Date(),
@@ -274,11 +331,11 @@ export async function POST(req: NextRequest) {
       // Output filenames use the model's chosen (or hinted) top title,
       // falling back to the source filename.
       const baseName = sanitizeFileName(
-        (narrative.title || fileMeta.name.replace(/\.[^/.]+$/, '')).trim()
+        (narrative.title || sourceFileName.replace(/\.[^/.]+$/, '')).trim()
       );
 
       sse.send('done', {
-        sourceFileName: fileMeta.name,
+        sourceFileName,
         narrative,
         clips,
         metadata,
@@ -297,7 +354,7 @@ export async function POST(req: NextRequest) {
   });
 
   const response = new NextResponse(stream, { headers: SSE_HEADERS });
-  if (refreshedTokens) {
+  if (refreshedTokens && session) {
     writeSession(response, { ...session, tokens: refreshedTokens });
   }
   return response;

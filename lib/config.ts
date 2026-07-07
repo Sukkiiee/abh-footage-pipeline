@@ -11,6 +11,15 @@ function required(name: string): string {
 }
 
 export const config = {
+  // Off by default: a "list/read any local file path" endpoint is fine when
+  // this app is running on your own machine as its only user, but would be
+  // a real path-disclosure risk if enabled on a hosted deployment other
+  // people can reach -- it would let any visitor probe what folders/video
+  // files exist on the server's own disk. Only turn this on for a local
+  // dev/personal run of the app, never on a shared hosted instance.
+  get localFootageEnabled() {
+    return process.env.ENABLE_LOCAL_FOOTAGE === 'true';
+  },
   google: {
     get clientId() {
       return required('GOOGLE_CLIENT_ID');

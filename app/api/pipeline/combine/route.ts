@@ -87,18 +87,25 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'No videos provided to combine.' }, { status: 400 });
   }
 
-  let authCtx;
+  // Combining doesn't actually touch Drive -- it only ever used requireDrive
+  // to piggyback on session-token refresh. That means it shouldn't force a
+  // Drive connection just to combine, e.g., several purely local-footage
+  // runs: only bail out on a genuine, unexpected auth error, not simply
+  // "not connected."
+  let session;
+  let refreshedTokens = null;
   try {
-    authCtx = await requireDrive(req);
+    const authCtx = await requireDrive(req);
+    session = authCtx.session;
+    refreshedTokens = authCtx.finalizeTokens();
   } catch (err) {
-    const status = err instanceof NotConnectedError ? 401 : 500;
-    return NextResponse.json(
-      { error: err instanceof Error ? err.message : 'Authorization error.' },
-      { status }
-    );
+    if (!(err instanceof NotConnectedError)) {
+      return NextResponse.json(
+        { error: err instanceof Error ? err.message : 'Authorization error.' },
+        { status: 500 }
+      );
+    }
   }
-  const { session } = authCtx;
-  const refreshedTokens = authCtx.finalizeTokens();
 
   try {
     const combinedNarrative = buildCombinedNarrative(videos, titleHint);

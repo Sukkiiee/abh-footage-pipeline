@@ -42,6 +42,30 @@ and the .docx/.fcpxml/.srt export buttons), and **History** (every past
 run, searchable by title/file name/clip name, each with its own re-download
 buttons -- see "Run history" below for how this survives page refreshes).
 
+## Local footage (no Google Drive)
+
+Footage can also be read straight off a hard drive instead of Google Drive
+-- pick "Local folder" instead of "Google Drive" as the footage source in
+the UI, paste an absolute folder path, and it lists/processes `.mp4`/`.mov`
+files from that path (and its subfolders) exactly like the Drive flow does,
+reusing the same transcription/narrative/short-form/export pipeline
+unchanged.
+
+**This only works when the app itself is running on the machine that has
+the footage** -- e.g. `npm run dev` or a local `npm run start` on your own
+computer. It cannot work against the hosted Render/Vercel deployment,
+because a cloud server has no network path into your hard drive; that's not
+a limitation of this feature, it's just what "hosted" means. Local and
+Drive sources aren't mutually exclusive: run the app locally and you get
+both options side by side.
+
+**Off by default, on purpose.** Set `ENABLE_LOCAL_FOOTAGE=true` in
+`.env.local` to turn it on. It's disabled otherwise because the endpoint
+behind it lists and reads whatever path you give it -- fine when you're the
+only person who can reach your own local instance, but a real
+path-disclosure risk if it were ever exposed on a shared hosted deployment.
+Never enable it there.
+
 ## Stack
 
 Next.js 14 (App Router) · googleapis · OpenAI SDK pointed at Groq's free-tier Whisper endpoint (transcription) · a provider-agnostic LLM layer defaulting to Groq's free-tier Llama models, switchable to Anthropic's Claude SDK via one env var (narrative + short-form generation) · fluent-ffmpeg + ffmpeg-static/@ffprobe-installer/ffprobe · `docx`. No database: the Google OAuth tokens and connected folder are stored in a single encrypted, httpOnly cookie. Whether a file has already been processed is tracked client-side (`localStorage`) so it survives across sessions in that browser.

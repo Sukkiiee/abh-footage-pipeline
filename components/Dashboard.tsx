@@ -426,6 +426,12 @@ export default function Dashboard() {
   const [folderBusy, setFolderBusy] = useState(false);
   const [files, setFiles] = useState<DriveVideoFile[] | null>(null);
   const [filesTruncated, setFilesTruncated] = useState(false);
+  // Footage can come from the connected Drive folder or straight from a
+  // local disk path (only meaningful when this app itself is running on
+  // the machine that has the footage -- see lib/local-files.ts).
+  const [footageSourceMode, setFootageSourceMode] = useState<'drive' | 'local'>('drive');
+  const [localFolderPath, setLocalFolderPath] = useState('');
+  const [localFilesBusy, setLocalFilesBusy] = useState(false);
   const [processedMap, setProcessedMap] = useState<Record<string, string>>({});
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [footageListExpanded, setFootageListExpanded] = useState(true);
@@ -494,6 +500,27 @@ export default function Dashboard() {
     setFilesTruncated(!!data.truncated);
     setProcessedMap(loadProcessedMap());
   }, []);
+
+  async function refreshLocalFiles() {
+    if (!localFolderPath.trim()) return;
+    setError(null);
+    setLocalFilesBusy(true);
+    try {
+      const res = await fetch(`/api/local/files?dir=${encodeURIComponent(localFolderPath.trim())}`);
+      const data = await res.json();
+      if (!res.ok) {
+        setError(data.error || 'Failed to list that local folder.');
+        return;
+      }
+      setFiles(data.files);
+      setFilesTruncated(!!data.truncated);
+      setProcessedMap(loadProcessedMap());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to list that local folder.');
+    } finally {
+      setLocalFilesBusy(false);
+    }
+  }
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -642,14 +669,20 @@ export default function Dashboard() {
   }
 
   async function runPipeline(
-    target: { fileId?: string; driveLink?: string; displayName: string; sizeBytes?: number },
+    target: {
+      fileId?: string;
+      driveLink?: string;
+      localPath?: string;
+      displayName: string;
+      sizeBytes?: number;
+    },
     opts?: { collect?: (data: PipelineDone) => void; onError?: (message: string) => void }
   ) {
     setError(null);
     setProgressLog([]);
     setPercent(0);
     setRunningLabel(target.displayName);
-    setRunningFileId(target.fileId || 'link');
+    setRunningFileId(target.fileId || target.localPath || 'link');
     setPaused(false);
     setElapsedSeconds(0);
     setEstimatedTotalSeconds(target.sizeBytes ? estimateDurationSeconds(target.sizeBytes) : null);
@@ -672,6 +705,7 @@ export default function Dashboard() {
         body: JSON.stringify({
           fileId: target.fileId,
           driveLink: target.driveLink,
+          localPath: target.localPath,
           localMediaPath: localMediaPath || undefined,
           titleHint: titleHint || undefined,
           brief: brief || undefined,
@@ -749,8 +783,8 @@ export default function Dashboard() {
               setView('result');
             }
             setPercent(100);
-            if (target.fileId) {
-              markProcessed(target.fileId);
+            if (target.fileId || target.localPath) {
+              markProcessed(target.fileId || target.localPath!);
               setProcessedMap(loadProcessedMap());
             }
             if (target.sizeBytes) {
@@ -822,8 +856,14 @@ export default function Dashboard() {
     try {
       for (let i = 0; i < toRun.length; i++) {
         setBatchProgress({ current: i + 1, total: toRun.length });
+        const f = toRun[i];
         await runPipeline(
-          { fileId: toRun[i].id, displayName: toRun[i].name, sizeBytes: Number(toRun[i].size) || undefined },
+          {
+            fileId: f.source === 'local' ? undefined : f.id,
+            localPath: f.source === 'local' ? f.localPath : undefined,
+            displayName: f.name,
+            sizeBytes: Number(f.size) || undefined,
+          },
           { collect: (data) => collected.push(data), onError: (message) => failures.push(message) }
         );
         // A per-file failure is recorded above; keep going through the rest
@@ -983,7 +1023,27 @@ export default function Dashboard() {
       <div className="shell">
         {/* LEFT: footage queue + run options */}
         <div>
-          {!status.connected && (
+          <div className="panel">
+            <div className="eyebrow">Footage source</div>
+            <div className="view-toggle" style={{ width: '100%' }}>
+              <button
+                style={{ flex: 1 }}
+                className={footageSourceMode === 'drive' ? 'active' : ''}
+                onClick={() => setFootageSourceMode('drive')}
+              >
+                Google Drive
+              </button>
+              <button
+                style={{ flex: 1 }}
+                className={footageSourceMode === 'local' ? 'active' : ''}
+                onClick={() => setFootageSourceMode('local')}
+              >
+                Local folder
+              </button>
+            </div>
+          </div>
+
+          {footageSourceMode === 'drive' && !status.connected && (
             <div className="panel">
               <div className="eyebrow">Step 1 · Connect</div>
               <div className="field">
@@ -1001,7 +1061,7 @@ export default function Dashboard() {
             </div>
           )}
 
-          {status.connected && !status.folderId && (
+          {footageSourceMode === 'drive' && status.connected && !status.folderId && (
             <div className="panel">
               <div className="eyebrow">Step 2 · Connect a folder</div>
               <form onSubmit={submitFolder}>
@@ -1021,39 +1081,92 @@ export default function Dashboard() {
             </div>
           )}
 
-          {connected && (
+          {footageSourceMode === 'local' && !files && (
+            <div className="panel">
+              <div className="eyebrow">Local folder</div>
+              <div className="field">
+                <label>Absolute path on this machine</label>
+                <input
+                  type="text"
+                  placeholder="/Users/you/Movies/ABH_Footage"
+                  value={localFolderPath}
+                  onChange={(e) => setLocalFolderPath(e.target.value)}
+                />
+                <div className="hint">
+                  Only works if this app is running on your own computer (not a hosted deployment
+                  like Render) -- footage is read directly off this machine&apos;s disk, nothing is
+                  uploaded anywhere. Requires <span className="mono">ENABLE_LOCAL_FOOTAGE=true</span>{' '}
+                  in your environment.
+                </div>
+              </div>
+              <button
+                className="btn btn-primary"
+                style={{ width: '100%' }}
+                onClick={refreshLocalFiles}
+                disabled={localFilesBusy || !localFolderPath.trim()}
+              >
+                {localFilesBusy ? 'Scanning...' : 'Load footage from this folder'}
+              </button>
+            </div>
+          )}
+
+          {((footageSourceMode === 'drive' && connected) || (footageSourceMode === 'local' && files)) && (
             <>
               <div className="panel">
                 <div className="eyebrow">
                   Footage queue <span className="count">{files ? files.length : 0}</span>
                 </div>
-                <div className="footage-source">
-                  Connected to <span className="folder-name">{status.folderName}/</span> on Drive.
-                  Includes subfolders.
-                  <div style={{ marginTop: 10, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                    <button
-                      className="btn btn-ghost"
-                      style={{ flex: 'none', padding: '4px 10px', fontSize: 11 }}
-                      onClick={() => setStatus({ ...status, folderId: null, folderName: null })}
-                    >
-                      Change folder
-                    </button>
-                    <button
-                      className="btn btn-ghost"
-                      style={{ flex: 'none', padding: '4px 10px', fontSize: 11 }}
-                      onClick={disconnect}
-                    >
-                      Disconnect
-                    </button>
-                    <button
-                      className="btn btn-ghost"
-                      style={{ flex: 'none', padding: '4px 10px', fontSize: 11 }}
-                      onClick={refreshFiles}
-                    >
-                      Refresh
-                    </button>
+                {footageSourceMode === 'drive' ? (
+                  <div className="footage-source">
+                    Connected to <span className="folder-name">{status.folderName}/</span> on Drive.
+                    Includes subfolders.
+                    <div style={{ marginTop: 10, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                      <button
+                        className="btn btn-ghost"
+                        style={{ flex: 'none', padding: '4px 10px', fontSize: 11 }}
+                        onClick={() => setStatus({ ...status, folderId: null, folderName: null })}
+                      >
+                        Change folder
+                      </button>
+                      <button
+                        className="btn btn-ghost"
+                        style={{ flex: 'none', padding: '4px 10px', fontSize: 11 }}
+                        onClick={disconnect}
+                      >
+                        Disconnect
+                      </button>
+                      <button
+                        className="btn btn-ghost"
+                        style={{ flex: 'none', padding: '4px 10px', fontSize: 11 }}
+                        onClick={refreshFiles}
+                      >
+                        Refresh
+                      </button>
+                    </div>
                   </div>
-                </div>
+                ) : (
+                  <div className="footage-source">
+                    Reading from <span className="folder-name mono">{localFolderPath}</span> on this
+                    machine.
+                    <div style={{ marginTop: 10, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                      <button
+                        className="btn btn-ghost"
+                        style={{ flex: 'none', padding: '4px 10px', fontSize: 11 }}
+                        onClick={() => setFiles(null)}
+                      >
+                        Change folder
+                      </button>
+                      <button
+                        className="btn btn-ghost"
+                        style={{ flex: 'none', padding: '4px 10px', fontSize: 11 }}
+                        onClick={refreshLocalFiles}
+                        disabled={localFilesBusy}
+                      >
+                        {localFilesBusy ? 'Scanning...' : 'Refresh'}
+                      </button>
+                    </div>
+                  </div>
+                )}
 
                 {!files && <p className="muted">Loading footage...</p>}
                 {files && files.length === 0 && (
@@ -1132,23 +1245,25 @@ export default function Dashboard() {
                   </button>
                 </div>
 
-                <form
-                  onSubmit={runFromLink}
-                  style={{ marginTop: 18, paddingTop: 18, borderTop: '1px solid var(--hairline)' }}
-                >
-                  <div className="field" style={{ marginBottom: 10 }}>
-                    <label>Run from a Drive link</label>
-                    <input
-                      type="text"
-                      placeholder="https://drive.google.com/file/d/.../view"
-                      value={driveLinkInput}
-                      onChange={(e) => setDriveLinkInput(e.target.value)}
-                    />
-                  </div>
-                  <button type="submit" className="btn btn-ghost" style={{ width: '100%' }} disabled={isBusy || !driveLinkInput.trim()}>
-                    {runningFileId === 'link' ? 'Running...' : 'Run from link'}
-                  </button>
-                </form>
+                {footageSourceMode === 'drive' && (
+                  <form
+                    onSubmit={runFromLink}
+                    style={{ marginTop: 18, paddingTop: 18, borderTop: '1px solid var(--hairline)' }}
+                  >
+                    <div className="field" style={{ marginBottom: 10 }}>
+                      <label>Run from a Drive link</label>
+                      <input
+                        type="text"
+                        placeholder="https://drive.google.com/file/d/.../view"
+                        value={driveLinkInput}
+                        onChange={(e) => setDriveLinkInput(e.target.value)}
+                      />
+                    </div>
+                    <button type="submit" className="btn btn-ghost" style={{ width: '100%' }} disabled={isBusy || !driveLinkInput.trim()}>
+                      {runningFileId === 'link' ? 'Running...' : 'Run from link'}
+                    </button>
+                  </form>
+                )}
               </div>
 
               <div className="panel">
