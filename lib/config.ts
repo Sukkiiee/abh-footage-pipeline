@@ -77,7 +77,13 @@ export const config = {
   // generously for local use.
   get maxSourceFileGB() {
     const raw = process.env.MAX_SOURCE_FILE_GB;
-    const parsed = raw ? Number(raw) : NaN;
+    // Accepts "20", "20GB", "20 GB", "20gb" etc, not just a bare number --
+    // a plain Number(raw) call silently fails (falls back to the default
+    // with zero indication why) on anything with a "GB" suffix, which is
+    // exactly what someone would naturally type into a field named
+    // MAX_SOURCE_FILE_GB. Confirmed happening in practice, not theoretical.
+    const cleaned = raw?.trim().replace(/\s*gb?$/i, '');
+    const parsed = cleaned ? Number(cleaned) : NaN;
     return Number.isFinite(parsed) && parsed > 0 ? parsed : 10;
   },
   // Cap on combined reference material (uploaded docs + transcribed
