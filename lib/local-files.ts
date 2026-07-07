@@ -27,6 +27,16 @@ export interface ListLocalFilesResult {
 export async function listLocalVideoFilesRecursive(rootDir: string): Promise<ListLocalFilesResult> {
   const resolvedRoot = path.resolve(rootDir);
   const rootStat = await fs.promises.stat(resolvedRoot).catch(() => null);
+
+  if (rootStat?.isFile()) {
+    // A very natural mistake: pasting the path to the video itself rather
+    // than the folder it's in. Point at exactly what to type instead of
+    // just rejecting it.
+    throw new Error(
+      `"${rootDir}" is a file, not a folder. Point this at the folder that contains your videos instead, e.g. "${path.dirname(resolvedRoot)}".`
+    );
+  }
+
   if (!rootStat || !rootStat.isDirectory()) {
     throw new Error(
       `"${rootDir}" isn't a folder this server process can see. Local footage is read directly off the disk of the machine running this app -- if that's not the machine you're using right now, this won't work; point it at a path that exists on the machine actually running the app.`
