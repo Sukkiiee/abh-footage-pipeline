@@ -103,6 +103,13 @@ export interface PipelineProgressEvent {
     | 'cleanup';
   message: string;
   percent: number;
+  /**
+   * Real transcript lines from the most recently completed Whisper chunk,
+   * present only on some 'transcribe'-stage events. This is genuine
+   * transcript text as it's produced (per audio chunk, not per word), used
+   * to show a live transcript feed in the UI rather than a generic spinner.
+   */
+  transcriptLines?: { timestamp: string; text: string }[];
 }
 
 export interface PipelineDoneEvent {

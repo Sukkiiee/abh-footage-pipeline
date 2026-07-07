@@ -69,7 +69,8 @@ async function transcribeChunk(
 export async function transcribeChunks(
   chunks: AudioChunk[],
   signal?: AbortSignal,
-  onBeforeChunk?: () => Promise<void>
+  onBeforeChunk?: () => Promise<void>,
+  onChunkTranscribed?: (segments: TranscriptSegment[]) => void
 ): Promise<Transcript> {
   const allSegments: TranscriptSegment[] = [];
   let runningId = 0;
@@ -78,12 +79,16 @@ export async function transcribeChunks(
   for (const chunk of chunks) {
     if (onBeforeChunk) await onBeforeChunk();
     const segments = await transcribeChunk(chunk.path, signal);
+    const chunkSegments: TranscriptSegment[] = [];
     for (const seg of segments) {
       const start = seg.start + chunk.offsetSec;
       const end = seg.end + chunk.offsetSec;
-      allSegments.push({ id: runningId++, start, end, text: seg.text });
+      const withOffset = { id: runningId++, start, end, text: seg.text };
+      allSegments.push(withOffset);
+      chunkSegments.push(withOffset);
       if (end > maxEnd) maxEnd = end;
     }
+    onChunkTranscribed?.(chunkSegments);
   }
 
   allSegments.sort((a, b) => a.start - b.start);

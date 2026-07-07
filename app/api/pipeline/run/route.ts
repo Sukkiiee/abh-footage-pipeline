@@ -12,7 +12,7 @@ import {
   NotConnectedError,
 } from '@/lib/google-drive';
 import { probeVideo, extractAudio, chunkAudioIfNeeded } from '@/lib/media';
-import { transcribeChunks } from '@/lib/whisper';
+import { transcribeChunks, formatTimestamp } from '@/lib/whisper';
 import { generateNarrative } from '@/lib/narrative';
 import { extractShortFormClips } from '@/lib/shortform';
 import { buildFcpxml } from '@/lib/fcpxml';
@@ -167,11 +167,27 @@ export async function POST(req: NextRequest) {
       });
       // onBeforeChunk lets a pause/stop take effect between individual
       // Whisper chunk uploads, not just between whole pipeline stages --
-      // this is usually the slowest step for long footage.
+      // this is usually the slowest step for long footage. onChunkTranscribed
+      // streams the real transcript text as each chunk actually finishes
+      // (not fabricated/simulated), for a live transcript feed in the UI --
+      // granular per audio chunk rather than per word, since that's what's
+      // actually available without re-architecting Whisper's own response.
       const transcript = await transcribeChunks(
         chunks,
         signal,
-        jobId ? () => checkpoint(jobId!) : undefined
+        jobId ? () => checkpoint(jobId!) : undefined,
+        (chunkSegments) => {
+          if (chunkSegments.length === 0) return;
+          sse.send('progress', {
+            stage: 'transcribe',
+            message: `Transcribing with Whisper (${chunks.length} chunk${chunks.length > 1 ? 's' : ''})...`,
+            percent: 45,
+            transcriptLines: chunkSegments.slice(-4).map((s) => ({
+              timestamp: formatTimestamp(s.start),
+              text: s.text,
+            })),
+          });
+        }
       );
 
       if (transcript.segments.length === 0) {

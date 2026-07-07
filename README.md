@@ -1,4 +1,4 @@
-# ABH Footage Pipeline
+# Dailies — footage in, story out
 
 Turns raw Google Drive footage into an editor-ready package: a long-form
 narrative outline in the ABH (Africa's Business Heroes) brand voice, a
@@ -29,6 +29,18 @@ The resulting timestamped transcript is added as another reference entry either 
 7. **Output** — all files are streamed to the browser as direct downloads; nothing is persisted server-side. Footage is check-box selectable rather than one "Run" button per file: check the videos you want (or use "Select all new" / "Select all"), then **"Run selected"** processes them sequentially. A single selected video behaves as before (its own `.docx`/`.fcpxml`/`.srt`). Selecting more than one **combines all of them into a single document set** instead of one per video: one `.docx` with every video's narrative sections (grouped and labeled by source) plus one combined short-form picks table, one `.fcpxml` timeline with every video as its own asset and every flagged clip from every video laid back-to-back in order (correctly handling source videos with different frame rates), and one `.srt` with each video's captions concatenated back-to-back as if they played consecutively.
 
 Progress streams live to the UI over SSE while the pipeline runs.
+
+## UI
+
+Three views: **Processing** (a live 5-step tracker -- pulling footage,
+transcribing, reviewing/building narrative, flagging short-form, exporting
+-- each with real elapsed time once done; the transcribing step also shows
+actual transcript lines as each Whisper chunk finishes, not a placeholder
+spinner), **Result** (the most recently finished run: title options,
+summary, narrative beats with timestamp citations, short-form picks table,
+and the .docx/.fcpxml/.srt export buttons), and **History** (every past
+run, searchable by title/file name/clip name, each with its own re-download
+buttons -- see "Run history" below for how this survives page refreshes).
 
 ## Stack
 

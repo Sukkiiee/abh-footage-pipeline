@@ -50,6 +50,10 @@ interface PipelineDone {
     fcpxmlLink?: string;
     srtLink?: string;
   };
+  /** When this run finished, for the History view. Attached client-side (not sent by the server). */
+  completedAt?: string;
+  /** How long this run took end to end, in seconds. Attached client-side (not sent by the server). */
+  runtimeSec?: number;
 }
 
 const PROCESSED_KEY = 'abh_processed_files';
@@ -83,6 +87,59 @@ function formatDuration(totalSeconds: number): string {
   const mm = Math.floor(s / 60);
   const ss = s % 60;
   return `${mm}:${String(ss).padStart(2, '0')}`;
+}
+
+// Groups the server's fine-grained SSE stages into the 5 steps the
+// processing view shows, matching the Dailies mockup's step tracker.
+const STEP_GROUPS: { label: string; detail: string; stages: string[] }[] = [
+  {
+    label: 'Pulling footage from Drive',
+    detail: 'Fetching file metadata and streaming the audio track directly from Drive.',
+    stages: ['metadata', 'download', 'probe', 'audio'],
+  },
+  {
+    label: 'Transcribing with timestamps',
+    detail: 'Whisper transcription, chunked for long footage.',
+    stages: ['transcribe'],
+  },
+  {
+    label: 'Reviewing & building narrative',
+    detail: 'Reading the transcript against the brief, grouping moments into beats.',
+    stages: ['narrative'],
+  },
+  {
+    label: 'Flagging short-form moments',
+    detail: 'Scanning for self-contained, hook-first clips between 15 and 60 seconds.',
+    stages: ['shortform'],
+  },
+  {
+    label: 'Exporting .docx, .fcpxml, .srt',
+    detail: 'Packaging results ready to hand to an editor for cut.',
+    stages: ['export', 'cleanup'],
+  },
+];
+
+type StepStatus = 'pending' | 'active' | 'done';
+
+function getStepStatus(groupIndex: number, currentGroupIndex: number): StepStatus {
+  if (currentGroupIndex < 0) return 'pending';
+  if (groupIndex < currentGroupIndex) return 'done';
+  if (groupIndex === currentGroupIndex) return 'active';
+  return 'pending';
+}
+
+/** Real elapsed time for a completed step group: the gap between its first event and the next group's first event, both from the client's own clock (the server doesn't send timestamps). */
+function getStepDurationSeconds(
+  groupIndex: number,
+  log: (PipelineProgressEvent & { receivedAt: number })[]
+): number | null {
+  const group = STEP_GROUPS[groupIndex];
+  const nextGroup = STEP_GROUPS[groupIndex + 1];
+  const firstOfThis = log.find((e) => group.stages.includes(e.stage));
+  if (!firstOfThis) return null;
+  const firstOfNext = nextGroup ? log.find((e) => nextGroup.stages.includes(e.stage)) : undefined;
+  if (!firstOfNext) return null;
+  return (firstOfNext.receivedAt - firstOfThis.receivedAt) / 1000;
 }
 
 const RUN_HISTORY_KEY = 'abh_run_history';
@@ -385,11 +442,18 @@ export default function Dashboard() {
 
   const [runningFileId, setRunningFileId] = useState<string | null>(null);
   const [runningLabel, setRunningLabel] = useState('');
-  const [progressLog, setProgressLog] = useState<PipelineProgressEvent[]>([]);
+  // receivedAt (client-side wall clock, not sent by the server) lets the
+  // processing view compute a real elapsed time per step: the gap between
+  // the first event of one step group and the first event of the next.
+  const [progressLog, setProgressLog] = useState<(PipelineProgressEvent & { receivedAt: number })[]>(
+    []
+  );
   const [percent, setPercent] = useState(0);
   const [results, setResults] = useState<PipelineDone[]>(() => loadResultsHistory());
   const [expandedResult, setExpandedResult] = useState(0);
-  const [activeTab, setActiveTab] = useState<'pipeline' | 'history'>('pipeline');
+  const [view, setView] = useState<'processing' | 'result' | 'history'>('result');
+  const [liveTranscriptLines, setLiveTranscriptLines] = useState<{ timestamp: string; text: string }[]>([]);
+  const [historySearch, setHistorySearch] = useState('');
   const [batchActive, setBatchActive] = useState(false);
   const [batchProgress, setBatchProgress] = useState<{ current: number; total: number } | null>(
     null
@@ -589,6 +653,8 @@ export default function Dashboard() {
     setPaused(false);
     setElapsedSeconds(0);
     setEstimatedTotalSeconds(target.sizeBytes ? estimateDurationSeconds(target.sizeBytes) : null);
+    setLiveTranscriptLines([]);
+    setView('processing');
 
     const jobId =
       typeof crypto !== 'undefined' && crypto.randomUUID
@@ -651,14 +717,28 @@ export default function Dashboard() {
           const data = JSON.parse(dataMatch[1]);
 
           if (eventName === 'progress') {
-            setProgressLog((prev) => [...prev, data as PipelineProgressEvent]);
-            setPercent((data as PipelineProgressEvent).percent);
+            const progressEvent = data as PipelineProgressEvent;
+            setProgressLog((prev) => [...prev, { ...progressEvent, receivedAt: Date.now() }]);
+            setPercent(progressEvent.percent);
+            if (progressEvent.transcriptLines && progressEvent.transcriptLines.length > 0) {
+              setLiveTranscriptLines(progressEvent.transcriptLines);
+            }
           } else if (eventName === 'done') {
+            // completedAt/runtimeSec aren't sent by the server -- attached
+            // here, once, from this client's own clock, so every result
+            // (single run or one collected into a batch/combine) carries
+            // real history metadata without needing server-side storage.
+            const enriched: PipelineDone = {
+              ...(data as PipelineDone),
+              completedAt: new Date().toISOString(),
+              runtimeSec: (Date.now() - runStart) / 1000,
+            };
             if (opts?.collect) {
-              opts.collect(data as PipelineDone);
+              opts.collect(enriched);
             } else {
-              setResults((prev) => [data as PipelineDone, ...prev]);
+              setResults((prev) => [enriched, ...prev]);
               setExpandedResult(0);
+              setView('result');
             }
             setPercent(100);
             if (target.fileId) {
@@ -758,6 +838,7 @@ export default function Dashboard() {
       setResults((prev) => [collected[0], ...prev]);
       setExpandedResult(0);
       setSelectedIds(new Set());
+      setView('result');
       return;
     }
 
@@ -803,11 +884,14 @@ export default function Dashboard() {
         docxFilename: data.docxFilename,
         fcpxmlFilename: data.fcpxmlFilename,
         srtFilename: `${data.docxFilename.replace(/ - ABH Narrative\.docx$/, '')} - Combined Transcript.srt`,
+        completedAt: new Date().toISOString(),
+        runtimeSec: collected.reduce((sum, c) => sum + (c.runtimeSec || 0), 0),
       };
 
       setResults((prev) => [combined, ...prev]);
       setExpandedResult(0);
       setSelectedIds(new Set());
+      setView('result');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to combine results.');
     } finally {
@@ -816,576 +900,735 @@ export default function Dashboard() {
   }
 
   if (status === null) {
-    return <div className="muted">Loading...</div>;
+    return <div className="muted" style={{ padding: 32 }}>Loading...</div>;
   }
+
+  const connected = status.connected && !!status.folderId;
+  const newCount = files ? files.filter((f) => !processedMap[f.id]).length : 0;
+  const currentGroupIndex =
+    progressLog.length > 0
+      ? STEP_GROUPS.findIndex((g) => g.stages.includes(progressLog[progressLog.length - 1].stage))
+      : -1;
+  const displayedResult = results[expandedResult] ?? results[0];
+  const filteredHistory = results.filter((r) => {
+    if (!historySearch.trim()) return true;
+    const q = historySearch.toLowerCase();
+    return (
+      r.narrative.title.toLowerCase().includes(q) ||
+      r.sourceFileName.toLowerCase().includes(q) ||
+      r.clips.some((c) => c.title.toLowerCase().includes(q))
+    );
+  });
+  const playheadPercent = runningFileId ? percent : 18;
 
   return (
     <>
       {error && <div className="error-banner">{error}</div>}
 
-      <div className="tab-bar">
-        <button
-          className={activeTab === 'pipeline' ? 'active' : ''}
-          onClick={() => setActiveTab('pipeline')}
-        >
-          Pipeline
-        </button>
-        <button
-          className={activeTab === 'history' ? 'active' : ''}
-          onClick={() => setActiveTab('history')}
-        >
-          History{results.length > 0 ? ` (${results.length})` : ''}
-        </button>
-      </div>
-
-      {activeTab === 'pipeline' && (
-      <>
-      {!status.connected && (
-        <div className="card">
-          <h2><span className="step-badge">1</span>Connect Google Drive</h2>
-          <p className="muted">
-            Connect once. This app requests read-only access so it can list and download footage
-            from a folder you choose.
-          </p>
-          <a href="/api/auth/google">
-            <button>Connect Google Drive</button>
-          </a>
+      <div className="ruler-wrap">
+        <div className="topbar">
+          <div className="brand">
+            <span className="brand-mark">Dailies</span>
+            <span className="brand-tag">footage in, story out — ABH</span>
+          </div>
+          <div className="live-status">
+            <span className={`live-dot ${connected ? '' : 'idle'}`}></span>
+            {connected
+              ? `Watching /${status.folderName} — ${files ? files.length : 0} clips, ${newCount} new`
+              : 'Not connected to Drive yet'}
+          </div>
         </div>
-      )}
-
-      {status.connected && !status.folderId && (
-        <div className="card">
-          <h2><span className="step-badge">2</span>Connect a Drive folder</h2>
-          <p className="muted">Paste the folder URL or ID that holds your raw footage.</p>
-          <form onSubmit={submitFolder}>
-            <input
-              type="text"
-              placeholder="https://drive.google.com/drive/folders/..."
-              value={folderInput}
-              onChange={(e) => setFolderInput(e.target.value)}
-            />
-            <button type="submit" disabled={folderBusy}>
-              {folderBusy ? 'Verifying...' : 'Connect folder'}
-            </button>
-          </form>
-        </div>
-      )}
-
-      {status.connected && status.folderId && (
-        <>
-          <div className="card">
-            <h2>Connected</h2>
-            <p className="muted">
-              Folder: <strong>{status.folderName}</strong>
-            </p>
-            <div className="download-row">
-              <button className="secondary" onClick={() => setStatus({ ...status, folderId: null, folderName: null })}>
-                Change folder
-              </button>
-              <button className="secondary" onClick={disconnect}>
-                Disconnect Drive
-              </button>
-              <button className="secondary" onClick={refreshFiles}>
-                Refresh footage list
-              </button>
-            </div>
+        <div className="ruler">
+          <div className="ruler-track"></div>
+          <div className="tick major" style={{ left: 32 }}>
+            <span className="tick-label">00:00</span>
           </div>
-
-          <div className="card">
-            <h2>Run options (optional, apply to any run below)</h2>
-
-            <span className="field-label">Title direction (optional)</span>
-            <input
-              type="text"
-              placeholder="e.g. lean into the founder's mother, or the $4,000 number"
-              value={titleHint}
-              onChange={(e) => setTitleHint(e.target.value)}
-            />
-            <p className="muted" style={{ marginTop: -6 }}>
-              Steers the title options generated below, not a fixed title.
-            </p>
-
-            <span className="field-label">Brief for this piece</span>
-            <textarea
-              placeholder="e.g. This is Amara's semifinal pitch round. Focus on the founder's origin story and the trust problem she solved, not the numbers slide."
-              value={brief}
-              onChange={(e) => setBrief(e.target.value)}
-              rows={4}
-              style={{
-                width: '100%',
-                padding: '10px 12px',
-                background: 'var(--panel-2)',
-                border: '1px solid var(--border)',
-                borderRadius: 6,
-                color: 'var(--text)',
-                fontSize: 14,
-                marginBottom: 12,
-                fontFamily: 'inherit',
-                resize: 'vertical',
-              }}
-            />
-            <p className="muted" style={{ marginTop: -6 }}>
-              Optional producer context/angle. Leave blank to let the footage speak for itself.
-            </p>
-
-            <span className="field-label">Target video length (minutes, optional)</span>
-            <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-              <select
-                value={useCustomLength ? 'custom' : targetLengthMinutes || ''}
-                onChange={(e) => {
-                  if (e.target.value === 'custom') {
-                    setUseCustomLength(true);
-                    setTargetLengthMinutes('');
-                  } else {
-                    setUseCustomLength(false);
-                    setTargetLengthMinutes(e.target.value);
-                  }
-                }}
-                style={{ maxWidth: 200 }}
-              >
-                <option value="">No target (let it run naturally)</option>
-                {TARGET_LENGTH_PRESETS.map((m) => (
-                  <option key={m} value={m}>
-                    {m} minute{m === '1' ? '' : 's'}
-                  </option>
-                ))}
-                <option value="custom">Custom...</option>
-              </select>
-              {useCustomLength && (
-                <input
-                  type="number"
-                  min={1}
-                  step={1}
-                  placeholder="minutes"
-                  value={targetLengthMinutes}
-                  onChange={(e) => setTargetLengthMinutes(e.target.value)}
-                  style={{ maxWidth: 120, marginBottom: 0 }}
-                />
-              )}
-            </div>
-            <p className="muted" style={{ marginTop: 6 }}>
-              Paces the long-form outline to roughly this runtime. Short-form clips stay 15-60s regardless.
-            </p>
-
-            <span className="field-label">Reference documents (optional)</span>
-            <p className="muted" style={{ marginTop: 0 }}>
-              Style/soundbite guides, not facts about this footage. .txt, .md, .docx (no PDF yet).
-            </p>
-            <input
-              type="file"
-              multiple
-              accept=".txt,.md,.docx"
-              onChange={(e) => {
-                handleReferenceUpload(e.target.files);
-                e.target.value = '';
-              }}
-              disabled={referenceUploadBusy}
-            />
-            {referenceUploadBusy && <p className="muted">Reading file(s)...</p>}
-
-            <p className="muted" style={{ marginTop: 12, marginBottom: 4 }}>
-              Or add a video link (YouTube, Instagram, Drive, etc.) -- transcribed the same way as your footage. YouTube is most reliable.
-            </p>
-            <form onSubmit={handleAddReferenceVideo}>
-              <input
-                type="text"
-                placeholder="https://www.youtube.com/watch?v=..."
-                value={referenceVideoUrl}
-                onChange={(e) => setReferenceVideoUrl(e.target.value)}
-                disabled={referenceVideoBusy}
-              />
-              <button type="submit" disabled={referenceVideoBusy || !referenceVideoUrl.trim()}>
-                {referenceVideoBusy ? 'Transcribing video...' : 'Add video'}
-              </button>
-            </form>
-
-            {referenceDocs.length > 0 && (
-              <div style={{ marginTop: 8 }}>
-                {referenceDocs.map((d) => (
-                  <div
-                    key={d.filename}
-                    className="file-row"
-                    style={{ padding: '8px 0' }}
-                  >
-                    <span className="file-sub">
-                      {d.filename} · {d.text.length.toLocaleString()} chars
-                    </span>
-                    <button className="secondary" onClick={() => removeReferenceDoc(d.filename)}>
-                      Remove
-                    </button>
-                  </div>
-                ))}
-                {(() => {
-                  const total = referenceDocs.reduce((sum, d) => sum + d.text.length, 0);
-                  return total > MAX_REFERENCE_CHARS ? (
-                    <p className="muted" style={{ color: 'var(--danger)' }}>
-                      Combined reference material is {total.toLocaleString()} characters; only the
-                      first {MAX_REFERENCE_CHARS.toLocaleString()} are sent per run.
-                    </p>
-                  ) : null;
-                })()}
-              </div>
-            )}
-
-            <span className="field-label" style={{ marginTop: 12 }}>Local media path for FCPXML</span>
-            <input
-              type="text"
-              placeholder="/Users/editor/Movies/ABH_Footage/"
-              value={localMediaPath}
-              onChange={(e) => setLocalMediaPath(e.target.value)}
-            />
-            <p className="muted" style={{ marginTop: -6 }}>
-              The generated .fcpxml references the original source file by path so Final Cut Pro
-              can conform it. If left blank it defaults to a placeholder path; Final Cut will
-              prompt to relink to the real file location on the editor&apos;s machine either way.
-            </p>
+          <div className="tick" style={{ left: 180 }}></div>
+          <div className="tick major" style={{ left: 328 }}>
+            <span className="tick-label">00:30</span>
           </div>
-
-          <div className="card">
-            <h2>Run from a Drive link</h2>
-            <p className="muted">
-              Paste a share link (or raw file ID) for a specific .mp4/.mov, and run the pipeline
-              on it directly, whether or not it&apos;s in the connected folder listed below.
-              Access is governed by whatever the connected Drive account can see.
-            </p>
-            <form onSubmit={runFromLink}>
-              <input
-                type="text"
-                placeholder="https://drive.google.com/file/d/.../view"
-                value={driveLinkInput}
-                onChange={(e) => setDriveLinkInput(e.target.value)}
-              />
-              <button type="submit" disabled={isBusy || !driveLinkInput.trim()}>
-                {runningFileId === 'link' ? 'Running...' : 'Run from link'}
-              </button>
-            </form>
+          <div className="tick" style={{ left: 476 }}></div>
+          <div className="tick major" style={{ left: 624 }}>
+            <span className="tick-label">01:00</span>
           </div>
-
-          <div className="card">
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
-              <h2
-                style={{ marginBottom: 0, cursor: 'pointer' }}
-                onClick={() => setFootageListExpanded((v) => !v)}
-              >
-                <span className="step-badge">3</span>
-                <span className="chevron">{footageListExpanded ? '▾' : '▸'}</span>
-                Footage{files ? ` (${files.length})` : ''}
-                {selectedIds.size > 0 ? ` · ${selectedIds.size} selected` : ''}
-              </h2>
-              <button onClick={runSelected} disabled={isBusy || selectedIds.size === 0}>
-                {batchActive && batchProgress
-                  ? `Processing ${batchProgress.current}/${batchProgress.total}...`
-                  : combining
-                  ? 'Combining into one document...'
-                  : `Run selected (${selectedIds.size})`}
-              </button>
-            </div>
-            <p className="muted">
-              Includes footage in subfolders of the connected folder, not just files at the top
-              level. Check the files you want, then run them together -- if you select more than
-              one, the results combine into a single .docx / .fcpxml / .srt instead of one set
-              per video. Click the heading above to collapse/expand the list.
-            </p>
-            {files && files.length > 0 && (
-              <div className="segmented" style={{ marginBottom: 8 }}>
-                <button
-                  className="secondary"
-                  onClick={() => setSelectedIds(new Set(files.filter((f) => !processedMap[f.id]).map((f) => f.id)))}
-                  disabled={isBusy}
-                >
-                  Select all new
-                </button>
-                <button
-                  className="secondary"
-                  onClick={() => setSelectedIds(new Set(files.map((f) => f.id)))}
-                  disabled={isBusy}
-                >
-                  Select all
-                </button>
-                <button className="secondary" onClick={() => setSelectedIds(new Set())} disabled={isBusy}>
-                  Clear selection
-                </button>
-              </div>
-            )}
-            {filesTruncated && (
-              <p className="muted" style={{ color: 'var(--danger)' }}>
-                This folder tree is large enough that the list below may be incomplete (a safety
-                cap was hit while scanning subfolders). Use a more specific subfolder link, or the
-                &quot;Run from a Drive link&quot; card above for a specific file, if what you need
-                isn&apos;t showing.
-              </p>
-            )}
-            {!files && <p className="muted">Loading footage...</p>}
-            {files && files.length === 0 && <p className="muted">No .mp4/.mov files found in this folder or its subfolders.</p>}
-            {footageListExpanded && (
-              <div style={{ maxHeight: 480, overflowY: 'auto' }}>
-                {files &&
-                  files.map((f) => {
-                    const isProcessed = !!processedMap[f.id];
-                    const isRunning = runningFileId === f.id;
-                    const estimate = f.size ? estimateDurationSeconds(Number(f.size)) : null;
-                    return (
-                      <label className="file-row" key={f.id} style={{ cursor: isBusy ? 'default' : 'pointer' }}>
-                        <input
-                          type="checkbox"
-                          checked={selectedIds.has(f.id)}
-                          onChange={() => toggleSelected(f.id)}
-                          disabled={isBusy}
-                          style={{ marginRight: 12 }}
-                        />
-                        <div className="file-meta">
-                          <span className="file-name">
-                            {f.name}
-                            <span className={`badge ${isProcessed ? 'processed' : 'new'}`}>
-                              {isProcessed ? 'Processed' : 'New'}
-                            </span>
-                            {isRunning && <span className="badge new">Processing now</span>}
-                          </span>
-                          <span className="file-sub">
-                            {f.folderPath ? `${f.folderPath}/ · ` : ''}
-                            {formatBytes(f.size)} {f.createdTime ? `· added ${new Date(f.createdTime).toLocaleString()}` : ''}
-                            {estimate !== null
-                              ? ` · ~${formatDuration(estimate)} estimated`
-                              : ' · no time estimate yet (based on past runs on this machine)'}
-                          </span>
-                        </div>
-                      </label>
-                    );
-                  })}
-              </div>
-            )}
+          <div className="tick" style={{ left: 772 }}></div>
+          <div className="tick major" style={{ left: 920 }}>
+            <span className="tick-label">01:30</span>
           </div>
-        </>
-      )}
-
-      {runningFileId && (
-        <div className="card">
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', flexWrap: 'wrap', gap: 8 }}>
-            <h2 style={{ marginBottom: 0 }}>
-              {batchProgress
-                ? `Batch ${batchProgress.current}/${batchProgress.total} · `
-                : ''}
-              Pipeline progress{runningLabel ? `: ${runningLabel}` : ''}
-              {paused ? ' (paused)' : ''}
-            </h2>
-            <span className="muted" style={{ fontSize: 13 }}>
-              {estimatedTotalSeconds !== null
-                ? elapsedSeconds < estimatedTotalSeconds
-                  ? `Est. remaining: ${formatDuration(estimatedTotalSeconds - elapsedSeconds)}`
-                  : `Est. remaining: almost done (took longer than the ${formatDuration(estimatedTotalSeconds)} estimate)`
-                : `Elapsed: ${formatDuration(elapsedSeconds)} (no estimate yet -- based on past runs on this machine)`}
+          <div className="tick" style={{ left: 1068 }}></div>
+          <div className="tick major" style={{ right: 32 }}>
+            <span className="tick-label" style={{ right: 0, left: 'auto', transform: 'translateX(0)' }}>
+              02:00
             </span>
           </div>
-          <div className="progress-track">
-            <div className="progress-fill" style={{ width: `${percent}%` }} />
-          </div>
-          <div className="download-row" style={{ marginBottom: 12 }}>
-            <button
-              className="secondary"
-              onClick={() => sendPipelineControl(paused ? 'resume' : 'pause')}
-              disabled={controlBusy}
-            >
-              {paused ? 'Continue' : 'Pause'}
-            </button>
-            <button className="secondary" onClick={() => sendPipelineControl('stop')} disabled={controlBusy}>
-              Stop
-            </button>
-          </div>
-          <p className="muted" style={{ marginTop: -6, fontSize: 12 }}>
-            Pause/Stop take effect at the next safe point (between pipeline stages, or between
-            Whisper chunks during transcription) -- not necessarily instantly mid-step.
-          </p>
-          {progressLog.map((p, i) => (
-            <div key={i} className={`log-line ${i === progressLog.length - 1 ? 'current' : ''}`}>
-              [{p.stage}] {p.message}
+          <div className="playhead" style={{ left: `calc(32px + (100% - 64px) * ${playheadPercent / 100})` }}></div>
+        </div>
+      </div>
+
+      <div className="shell">
+        {/* LEFT: footage queue + run options */}
+        <div>
+          {!status.connected && (
+            <div className="panel">
+              <div className="eyebrow">Step 1 · Connect</div>
+              <div className="field">
+                <label>Google Drive</label>
+                <div className="hint">
+                  Connect once. Read-only access to list and download footage from a folder you
+                  choose.
+                </div>
+              </div>
+              <a href="/api/auth/google">
+                <button className="btn btn-primary" style={{ width: '100%' }}>
+                  Connect Google Drive
+                </button>
+              </a>
             </div>
-          ))}
-        </div>
-      )}
-      </>
-      )}
+          )}
 
-      {activeTab === 'history' && (
-      <>
-      {results.length > 0 && (
-        <div className="card">
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', flexWrap: 'wrap', gap: 12 }}>
-            <h2 style={{ marginBottom: 0 }}>Past renders ({results.length})</h2>
-            <button
-              className="secondary"
-              onClick={() => {
-                if (window.confirm('Clear all saved renders? This cannot be undone.')) {
-                  setResults([]);
-                  setExpandedResult(0);
-                }
-              }}
-            >
-              Clear history
-            </button>
-          </div>
-          <p className="muted">
-            Saved on this device so a page refresh doesn&apos;t lose your work. Newest first.
-            Click a title to expand/collapse it.
-          </p>
-        </div>
-      )}
-
-      {results.length === 0 && (
-        <div className="card">
-          <h2>Past renders</h2>
-          <p className="muted">Nothing here yet. Finished runs from the Pipeline tab will show up here and stay saved across refreshes.</p>
-        </div>
-      )}
-
-      {results.map((result, idx) => {
-        const isExpanded = expandedResult === idx;
-        return (
-          <div className="card" key={idx}>
-            <div
-              style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', cursor: 'pointer' }}
-              onClick={() => setExpandedResult(isExpanded ? -1 : idx)}
-            >
-              <h2 style={{ marginBottom: 0 }}>
-                {isExpanded ? '▾' : '▸'} {result.narrative.title}
-              </h2>
-              <span className="muted" style={{ fontSize: 12 }}>
-                {result.sourceFileName}
-              </span>
+          {status.connected && !status.folderId && (
+            <div className="panel">
+              <div className="eyebrow">Step 2 · Connect a folder</div>
+              <form onSubmit={submitFolder}>
+                <div className="field">
+                  <label>Drive folder URL or ID</label>
+                  <input
+                    type="text"
+                    placeholder="https://drive.google.com/drive/folders/..."
+                    value={folderInput}
+                    onChange={(e) => setFolderInput(e.target.value)}
+                  />
+                </div>
+                <button type="submit" className="btn btn-primary" style={{ width: '100%' }} disabled={folderBusy}>
+                  {folderBusy ? 'Verifying...' : 'Connect folder'}
+                </button>
+              </form>
             </div>
+          )}
 
-            {isExpanded && (
-              <>
-                <p className="muted">{result.narrative.logline}</p>
-
-                {result.narrative.titleOptions && result.narrative.titleOptions.length > 1 && (
-                  <p className="muted">
-                    Other title options:{' '}
-                    {result.narrative.titleOptions.slice(1).map((t, i) => (
-                      <span className="citation" key={i}>
-                        {t}
-                      </span>
-                    ))}
-                  </p>
-                )}
-
-                {result.archived && (
-                  <p className="muted" style={{ marginTop: -4 }}>
-                    This run's files were moved to your Drive&apos;s &quot;ABH Pipeline Archive&quot;
-                    folder to free up local space. The links below open them there.
-                  </p>
-                )}
-                <div className="download-row">
-                  {result.docxBase64 ? (
+          {connected && (
+            <>
+              <div className="panel">
+                <div className="eyebrow">
+                  Footage queue <span className="count">{files ? files.length : 0}</span>
+                </div>
+                <div className="footage-source">
+                  Connected to <span className="folder-name">{status.folderName}/</span> on Drive.
+                  Includes subfolders.
+                  <div style={{ marginTop: 10, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                     <button
+                      className="btn btn-ghost"
+                      style={{ flex: 'none', padding: '4px 10px', fontSize: 11 }}
+                      onClick={() => setStatus({ ...status, folderId: null, folderName: null })}
+                    >
+                      Change folder
+                    </button>
+                    <button
+                      className="btn btn-ghost"
+                      style={{ flex: 'none', padding: '4px 10px', fontSize: 11 }}
+                      onClick={disconnect}
+                    >
+                      Disconnect
+                    </button>
+                    <button
+                      className="btn btn-ghost"
+                      style={{ flex: 'none', padding: '4px 10px', fontSize: 11 }}
+                      onClick={refreshFiles}
+                    >
+                      Refresh
+                    </button>
+                  </div>
+                </div>
+
+                {!files && <p className="muted">Loading footage...</p>}
+                {files && files.length === 0 && (
+                  <p className="muted">No .mp4/.mov files found in this folder or its subfolders.</p>
+                )}
+                {filesTruncated && (
+                  <p className="muted" style={{ color: 'var(--danger)' }}>
+                    This folder tree is large enough that the list below may be incomplete.
+                  </p>
+                )}
+
+                <div style={{ maxHeight: 420, overflowY: 'auto' }}>
+                  {files &&
+                    files.map((f) => {
+                      const isProcessed = !!processedMap[f.id];
+                      const isSelected = selectedIds.has(f.id);
+                      const estimate = f.size ? estimateDurationSeconds(Number(f.size)) : null;
+                      return (
+                        <div
+                          className={`clip-row ${isSelected ? 'selected' : ''}`}
+                          key={f.id}
+                          onClick={() => !isBusy && toggleSelected(f.id)}
+                        >
+                          <input
+                            type="checkbox"
+                            className="clip-check"
+                            checked={isSelected}
+                            onChange={() => toggleSelected(f.id)}
+                            onClick={(e) => e.stopPropagation()}
+                            disabled={isBusy}
+                          />
+                          <div className="clip-meta">
+                            <div className="clip-name">{f.name}</div>
+                            <div className="clip-sub">
+                              {formatBytes(f.size)}
+                              {estimate !== null ? ` · ~${formatDuration(estimate)} est.` : ' · no est. yet'}
+                              {f.folderPath ? ` · ${f.folderPath}/` : ''}
+                            </div>
+                          </div>
+                          <span className={`badge ${isProcessed ? 'done' : 'new'}`}>
+                            {isProcessed ? 'Processed' : 'New'}
+                          </span>
+                        </div>
+                      );
+                    })}
+                </div>
+
+                <div className="btn-row">
+                  <button className="btn btn-primary" onClick={runSelected} disabled={isBusy || selectedIds.size === 0}>
+                    {batchActive && batchProgress
+                      ? `Processing ${batchProgress.current}/${batchProgress.total}...`
+                      : combining
+                      ? 'Combining...'
+                      : `Run selected (${selectedIds.size})`}
+                  </button>
+                  <button
+                    className="btn btn-ghost"
+                    disabled={isBusy || !files}
+                    onClick={() =>
+                      setSelectedIds(new Set((files || []).filter((f) => !processedMap[f.id]).map((f) => f.id)))
+                    }
+                  >
+                    Select all new
+                  </button>
+                </div>
+                <div className="btn-row">
+                  <button
+                    className="btn btn-ghost"
+                    disabled={isBusy || !files}
+                    onClick={() => setSelectedIds(new Set((files || []).map((f) => f.id)))}
+                  >
+                    Select all
+                  </button>
+                  <button className="btn btn-ghost" disabled={isBusy} onClick={() => setSelectedIds(new Set())}>
+                    Clear selection
+                  </button>
+                </div>
+
+                <form
+                  onSubmit={runFromLink}
+                  style={{ marginTop: 18, paddingTop: 18, borderTop: '1px solid var(--hairline)' }}
+                >
+                  <div className="field" style={{ marginBottom: 10 }}>
+                    <label>Run from a Drive link</label>
+                    <input
+                      type="text"
+                      placeholder="https://drive.google.com/file/d/.../view"
+                      value={driveLinkInput}
+                      onChange={(e) => setDriveLinkInput(e.target.value)}
+                    />
+                  </div>
+                  <button type="submit" className="btn btn-ghost" style={{ width: '100%' }} disabled={isBusy || !driveLinkInput.trim()}>
+                    {runningFileId === 'link' ? 'Running...' : 'Run from link'}
+                  </button>
+                </form>
+              </div>
+
+              <div className="panel">
+                <div className="eyebrow">Run options</div>
+                <div className="field">
+                  <label>Brief for this piece</label>
+                  <textarea
+                    placeholder="e.g. This is Amara's semifinal round. Focus on the trust problem she solved, not the numbers slide."
+                    value={brief}
+                    onChange={(e) => setBrief(e.target.value)}
+                    rows={4}
+                  />
+                </div>
+                <div className="field">
+                  <label>Title direction</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. lean into the founder's mother"
+                    value={titleHint}
+                    onChange={(e) => setTitleHint(e.target.value)}
+                  />
+                </div>
+                <div className="field">
+                  <label>Target length (minutes)</label>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    placeholder="e.g. 3"
+                    value={targetLengthMinutes}
+                    onChange={(e) => setTargetLengthMinutes(e.target.value)}
+                  />
+                  <div className="hint">
+                    Shapes how many beats get built and how tightly they&apos;re paced. Short-form
+                    clips stay 15-60s regardless.
+                  </div>
+                </div>
+
+                <div className="field">
+                  <label>Reference docs (optional)</label>
+                  <input
+                    type="file"
+                    multiple
+                    accept=".txt,.md,.docx"
+                    onChange={(e) => {
+                      handleReferenceUpload(e.target.files);
+                      e.target.value = '';
+                    }}
+                    disabled={referenceUploadBusy}
+                  />
+                  <div className="hint">Style/soundbite guides, not facts about this footage. .txt, .md, .docx.</div>
+                  {referenceUploadBusy && <div className="hint">Reading file(s)...</div>}
+                </div>
+
+                <div className="field">
+                  <label>Or a reference video link</label>
+                  <form onSubmit={handleAddReferenceVideo} style={{ display: 'flex', gap: 8 }}>
+                    <input
+                      type="text"
+                      placeholder="https://www.youtube.com/watch?v=..."
+                      value={referenceVideoUrl}
+                      onChange={(e) => setReferenceVideoUrl(e.target.value)}
+                      disabled={referenceVideoBusy}
+                      style={{ flex: 1, marginBottom: 0 }}
+                    />
+                    <button
+                      type="submit"
+                      className="btn btn-ghost"
+                      style={{ flex: 'none' }}
+                      disabled={referenceVideoBusy || !referenceVideoUrl.trim()}
+                    >
+                      {referenceVideoBusy ? '...' : 'Add'}
+                    </button>
+                  </form>
+                </div>
+
+                {referenceDocs.length > 0 && (
+                  <div className="field">
+                    {referenceDocs.map((d) => (
+                      <div
+                        key={d.filename}
+                        style={{
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          padding: '6px 0',
+                          borderBottom: '1px solid var(--hairline)',
+                        }}
+                      >
+                        <span className="muted" style={{ fontSize: 11.5 }}>
+                          {d.filename} · {d.text.length.toLocaleString()} chars
+                        </span>
+                        <button
+                          className="btn btn-ghost"
+                          style={{ flex: 'none', padding: '3px 8px', fontSize: 11 }}
+                          onClick={() => removeReferenceDoc(d.filename)}
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    ))}
+                    {(() => {
+                      const total = referenceDocs.reduce((sum, d) => sum + d.text.length, 0);
+                      return total > MAX_REFERENCE_CHARS ? (
+                        <p className="muted" style={{ color: 'var(--danger)', marginTop: 6 }}>
+                          Combined reference material is {total.toLocaleString()} characters; only
+                          the first {MAX_REFERENCE_CHARS.toLocaleString()} are sent per run.
+                        </p>
+                      ) : null;
+                    })()}
+                  </div>
+                )}
+
+                <div className="field" style={{ marginBottom: 0 }}>
+                  <label>Local media path (for Final Cut)</label>
+                  <input
+                    type="text"
+                    placeholder="/Users/editor/Movies/ABH_Footage/"
+                    value={localMediaPath}
+                    onChange={(e) => setLocalMediaPath(e.target.value)}
+                  />
+                  <div className="hint">
+                    The .fcpxml references the source by this path so Final Cut can conform it.
+                  </div>
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+
+        {/* RIGHT: processing / result / history */}
+        <div className="panel" id="output-panel">
+          <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 18 }}>
+            <div className="view-toggle">
+              <button className={view === 'processing' ? 'active' : ''} onClick={() => setView('processing')}>
+                Processing
+              </button>
+              <button className={view === 'result' ? 'active' : ''} onClick={() => setView('result')}>
+                Result
+              </button>
+              <button className={view === 'history' ? 'active' : ''} onClick={() => setView('history')}>
+                History{results.length > 0 ? ` (${results.length})` : ''}
+              </button>
+            </div>
+          </div>
+
+          {view === 'processing' &&
+            (runningFileId ? (
+              <div>
+                <div className="proc-head">
+                  <div className="proc-file mono">{runningLabel}</div>
+                  <h2 className="proc-title">Processing footage{paused ? ' (paused)' : ''}</h2>
+                  <div className="proc-sub">
+                    {batchProgress ? `${batchProgress.current}/${batchProgress.total} selected · ` : ''}
+                    elapsed {formatDuration(elapsedSeconds)}
+                  </div>
+                </div>
+
+                <div className="steps">
+                  {STEP_GROUPS.map((group, i) => {
+                    const stepStatus = getStepStatus(i, currentGroupIndex);
+                    const duration = getStepDurationSeconds(i, progressLog);
+                    return (
+                      <div className={`step ${stepStatus}`} key={group.label}>
+                        <div className="step-marker">
+                          {stepStatus === 'done' ? '✓' : stepStatus === 'active' ? '↻' : i + 1}
+                        </div>
+                        <div className="step-body">
+                          <div className="step-name">
+                            {group.label}
+                            <span className="step-time">
+                              {stepStatus === 'done'
+                                ? duration !== null
+                                  ? formatDuration(duration)
+                                  : 'done'
+                                : stepStatus === 'active'
+                                ? 'running'
+                                : 'queued'}
+                            </span>
+                          </div>
+                          <div className="step-detail">
+                            {stepStatus === 'active' && progressLog.length > 0
+                              ? progressLog[progressLog.length - 1].message
+                              : group.detail}
+                          </div>
+                          {stepStatus === 'active' && (
+                            <div className="prog-bar">
+                              <div className="prog-fill" style={{ width: `${percent}%` }} />
+                            </div>
+                          )}
+                          {stepStatus === 'active' && group.stages.includes('transcribe') && liveTranscriptLines.length > 0 && (
+                            <div className="live-transcript">
+                              {liveTranscriptLines.map((l, li) => (
+                                <div key={li}>
+                                  <span className="tc">{l.timestamp}</span>
+                                  {l.text}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <div className="proc-footer">
+                  <div className="eta">
+                    {estimatedTotalSeconds !== null ? (
+                      elapsedSeconds < estimatedTotalSeconds ? (
+                        <>
+                          Estimated time remaining: <b>~{formatDuration(estimatedTotalSeconds - elapsedSeconds)}</b>
+                        </>
+                      ) : (
+                        <>Almost done (past the ~{formatDuration(estimatedTotalSeconds)} estimate)</>
+                      )
+                    ) : (
+                      <>
+                        Elapsed: <b>{formatDuration(elapsedSeconds)}</b> (no estimate yet)
+                      </>
+                    )}
+                  </div>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <button
+                      className="btn btn-ghost"
+                      onClick={() => sendPipelineControl(paused ? 'resume' : 'pause')}
+                      disabled={controlBusy}
+                    >
+                      {paused ? 'Continue' : 'Pause'}
+                    </button>
+                    <button className="btn btn-ghost" onClick={() => sendPipelineControl('stop')} disabled={controlBusy}>
+                      Cancel run
+                    </button>
+                  </div>
+                </div>
+                <p className="muted" style={{ marginTop: 10, fontSize: 11.5 }}>
+                  Pause/Cancel take effect at the next safe point (between pipeline stages, or
+                  between Whisper chunks during transcription), not necessarily instantly mid-step.
+                </p>
+              </div>
+            ) : (
+              <p className="muted">
+                Nothing is running right now. Select footage on the left and run it to see live
+                progress here.
+              </p>
+            ))}
+
+          {view === 'result' &&
+            (displayedResult ? (
+              <div>
+                <div className="video-id mono">{displayedResult.sourceFileName}</div>
+                <div className="video-head">
+                  <div>
+                    <h1 className="title">{displayedResult.narrative.title}</h1>
+                    <p className="summary">{displayedResult.narrative.logline}</p>
+                    {displayedResult.narrative.titleOptions && displayedResult.narrative.titleOptions.length > 1 && (
+                      <div className="alt-titles">
+                        {displayedResult.narrative.titleOptions.slice(1).map((t, i) => (
+                          <span className="alt-title-chip" key={i}>
+                            {t}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {displayedResult.archived && (
+                  <p className="muted" style={{ marginTop: 8 }}>
+                    This run&apos;s files were moved to your Drive&apos;s &quot;ABH Pipeline
+                    Archive&quot; folder. The buttons below open them there.
+                  </p>
+                )}
+
+                <div className="export-row">
+                  {displayedResult.docxBase64 ? (
+                    <div
+                      className="export-btn"
                       onClick={() =>
                         downloadBase64(
-                          result.docxFilename,
-                          result.docxBase64!,
+                          displayedResult.docxFilename,
+                          displayedResult.docxBase64!,
                           'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
                         )
                       }
                     >
-                      Download .docx
-                    </button>
-                  ) : result.archived?.docxLink ? (
-                    <a href={result.archived.docxLink} target="_blank" rel="noreferrer">
-                      <button className="secondary">Open .docx in Drive</button>
+                      <span className="ext">.docx</span> Narrative
+                    </div>
+                  ) : displayedResult.archived?.docxLink ? (
+                    <a href={displayedResult.archived.docxLink} target="_blank" rel="noreferrer">
+                      <div className="export-btn">
+                        <span className="ext">.docx</span> Narrative (Drive)
+                      </div>
                     </a>
                   ) : null}
-                  {result.fcpxmlBase64 ? (
-                    <button
-                      onClick={() => downloadBase64(result.fcpxmlFilename, result.fcpxmlBase64!, 'application/xml')}
+                  {displayedResult.fcpxmlBase64 ? (
+                    <div
+                      className="export-btn"
+                      onClick={() => downloadBase64(displayedResult.fcpxmlFilename, displayedResult.fcpxmlBase64!, 'application/xml')}
                     >
-                      Download .fcpxml
-                    </button>
-                  ) : result.archived?.fcpxmlLink ? (
-                    <a href={result.archived.fcpxmlLink} target="_blank" rel="noreferrer">
-                      <button className="secondary">Open .fcpxml in Drive</button>
+                      <span className="ext">.fcpxml</span> Final Cut
+                    </div>
+                  ) : displayedResult.archived?.fcpxmlLink ? (
+                    <a href={displayedResult.archived.fcpxmlLink} target="_blank" rel="noreferrer">
+                      <div className="export-btn">
+                        <span className="ext">.fcpxml</span> Final Cut (Drive)
+                      </div>
                     </a>
                   ) : null}
-                  {result.srtBase64 ? (
-                    <button
-                      onClick={() => downloadBase64(result.srtFilename, result.srtBase64!, 'application/x-subrip')}
+                  {displayedResult.srtBase64 ? (
+                    <div
+                      className="export-btn"
+                      onClick={() => downloadBase64(displayedResult.srtFilename, displayedResult.srtBase64!, 'application/x-subrip')}
                     >
-                      Download .srt
-                    </button>
-                  ) : result.archived?.srtLink ? (
-                    <a href={result.archived.srtLink} target="_blank" rel="noreferrer">
-                      <button className="secondary">Open .srt in Drive</button>
+                      <span className="ext">.srt</span> Subtitles
+                    </div>
+                  ) : displayedResult.archived?.srtLink ? (
+                    <a href={displayedResult.archived.srtLink} target="_blank" rel="noreferrer">
+                      <div className="export-btn">
+                        <span className="ext">.srt</span> Subtitles (Drive)
+                      </div>
                     </a>
                   ) : null}
                 </div>
 
-                <h3 style={{ marginTop: 24 }}>Narrative sections</h3>
-                {result.narrative.sections.map((s, i) => (
-                  <div className="section-block" key={i}>
-                    <h3>{s.heading}</h3>
-                    <p>{s.narrative}</p>
-                    {s.citations.map((c, j) => (
-                      <span className="citation" key={j}>
-                        {c.timestamp}
-                      </span>
-                    ))}
+                <div className="divider"></div>
+
+                <h2 className="section-head">Narrative sections</h2>
+                {displayedResult.narrative.sections.map((s, i) => (
+                  <div className="beat" key={i}>
+                    <div className="beat-title">{s.heading}</div>
+                    <div className="beat-text">{s.narrative}</div>
+                    <div className="tc-row">
+                      {s.citations.map((c, j) => (
+                        <span className="tc-chip" key={j}>
+                          {c.timestamp}
+                        </span>
+                      ))}
+                    </div>
                   </div>
                 ))}
 
-                <h3 style={{ marginTop: 24 }}>
-                  Short-form picks ({result.clips.length})
-                  {result.rejectedClipCount > 0 && (
-                    <span className="muted"> · {result.rejectedClipCount} candidate(s) filtered out</span>
+                <div className="divider"></div>
+
+                <div className="eyebrow" style={{ marginBottom: 16 }}>
+                  Short-form picks <span className="count">{displayedResult.clips.length}</span>
+                  {displayedResult.rejectedClipCount > 0 && (
+                    <span style={{ fontFamily: 'inherit', textTransform: 'none', letterSpacing: 0 }}>
+                      {displayedResult.rejectedClipCount} filtered out
+                    </span>
                   )}
-                </h3>
-                {result.clips.length === 0 ? (
+                </div>
+                {displayedResult.clips.length === 0 ? (
                   <p className="muted">No self-contained 15-60s moments were flagged.</p>
                 ) : (
-                  <table className="clips-table">
+                  <table>
                     <thead>
                       <tr>
-                        <th>#</th>
-                        <th>Title</th>
-                        <th>In</th>
-                        <th>Out</th>
-                        <th>Hook / Idea / Payoff</th>
+                        <th style={{ width: '26%' }}>Title</th>
+                        <th style={{ width: '14%' }}>In / Out</th>
+                        <th style={{ width: '28%' }}>Hook / idea / payoff</th>
                         <th>Rationale</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {result.clips.map((c, i) => (
+                      {displayedResult.clips.map((c, i) => (
                         <tr key={i}>
-                          <td>{i + 1}</td>
-                          <td>
+                          <td className="clip-title-cell">
                             {c.title}
                             {c.titleOptions && c.titleOptions.length > 1 && (
-                              <>
-                                <br />
-                                <span className="muted" style={{ fontSize: 11 }}>
-                                  or: {c.titleOptions.slice(1).join(' / ')}
-                                </span>
-                              </>
+                              <span className="alt">or: {c.titleOptions.slice(1).join(' / ')}</span>
                             )}
                           </td>
-                          <td>{c.startTimestamp}</td>
-                          <td>{c.endTimestamp}</td>
-                          <td>
-                            <strong>{c.hook}</strong>
+                          <td className="io-cell">
+                            {c.startTimestamp}
                             <br />
-                            {c.singleIdea}
-                            <br />
-                            <em>{c.payoff}</em>
+                            {c.endTimestamp}
                           </td>
-                          <td>{c.rationale}</td>
+                          <td className="hook-cell">
+                            <b>{c.hook}</b> {c.singleIdea}
+                          </td>
+                          <td className="rationale-cell">{c.rationale}</td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
                 )}
-              </>
-            )}
-          </div>
-        );
-      })}
-      </>
-      )}
+              </div>
+            ) : (
+              <p className="muted">
+                No results yet. Run some footage from the left panel to see the narrative breakdown
+                here.
+              </p>
+            ))}
+
+          {view === 'history' && (
+            <div>
+              <input
+                className="search-input"
+                placeholder="Search by title, file name, or clip name..."
+                value={historySearch}
+                onChange={(e) => setHistorySearch(e.target.value)}
+              />
+              {results.length === 0 && (
+                <p className="muted">
+                  Nothing here yet. Finished runs will show up here and stay saved across
+                  refreshes.
+                </p>
+              )}
+              {results.length > 0 && filteredHistory.length === 0 && (
+                <p className="muted">No past runs match &quot;{historySearch}&quot;.</p>
+              )}
+              {filteredHistory.length > 0 && (
+                <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
+                  <button
+                    className="btn btn-danger"
+                    style={{ flex: 'none' }}
+                    onClick={() => {
+                      if (window.confirm('Clear all saved renders? This cannot be undone.')) {
+                        setResults([]);
+                        setExpandedResult(0);
+                      }
+                    }}
+                  >
+                    Clear history
+                  </button>
+                </div>
+              )}
+              {filteredHistory.map((r, idx) => (
+                <div className="history-row" key={idx}>
+                  <div
+                    className="history-meta"
+                    style={{ cursor: 'pointer' }}
+                    onClick={() => {
+                      setExpandedResult(results.indexOf(r));
+                      setView('result');
+                    }}
+                  >
+                    <div className="history-sub">{r.sourceFileName}</div>
+                    <div className="history-title">{r.narrative.title}</div>
+                    <div className="history-stats">
+                      {r.completedAt ? new Date(r.completedAt).toLocaleString() : ''}
+                      {r.runtimeSec ? ` · ${formatDuration(r.runtimeSec)} runtime` : ''}
+                      {` · ${r.narrative.sections.length} beats · ${r.clips.length} short-form`}
+                    </div>
+                  </div>
+                  <div className="export-row" style={{ margin: 0 }}>
+                    {r.docxBase64 ? (
+                      <div
+                        className="export-btn"
+                        onClick={() =>
+                          downloadBase64(
+                            r.docxFilename,
+                            r.docxBase64!,
+                            'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+                          )
+                        }
+                      >
+                        <span className="ext">.docx</span>
+                      </div>
+                    ) : r.archived?.docxLink ? (
+                      <a href={r.archived.docxLink} target="_blank" rel="noreferrer">
+                        <div className="export-btn">
+                          <span className="ext">.docx</span>
+                        </div>
+                      </a>
+                    ) : null}
+                    {r.fcpxmlBase64 ? (
+                      <div className="export-btn" onClick={() => downloadBase64(r.fcpxmlFilename, r.fcpxmlBase64!, 'application/xml')}>
+                        <span className="ext">.fcpxml</span>
+                      </div>
+                    ) : r.archived?.fcpxmlLink ? (
+                      <a href={r.archived.fcpxmlLink} target="_blank" rel="noreferrer">
+                        <div className="export-btn">
+                          <span className="ext">.fcpxml</span>
+                        </div>
+                      </a>
+                    ) : null}
+                    {r.srtBase64 ? (
+                      <div className="export-btn" onClick={() => downloadBase64(r.srtFilename, r.srtBase64!, 'application/x-subrip')}>
+                        <span className="ext">.srt</span>
+                      </div>
+                    ) : r.archived?.srtLink ? (
+                      <a href={r.archived.srtLink} target="_blank" rel="noreferrer">
+                        <div className="export-btn">
+                          <span className="ext">.srt</span>
+                        </div>
+                      </a>
+                    ) : null}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
     </>
   );
 }

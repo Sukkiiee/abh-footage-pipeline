@@ -13,12 +13,8 @@ import Dashboard from '@/components/Dashboard';
 export const dynamic = 'force-dynamic';
 
 export default function Home() {
-  return (
-    <div className="container">
-      <header className="app-header">
-        <h1>ABH Footage Pipeline</h1>
-      </header>
-      <Dashboard />
-    </div>
-  );
+  // Dashboard renders the entire "Dailies" shell itself (topbar, timecode
+  // ruler, two-column layout) per the design spec, rather than being
+  // wrapped in a separate page-level header.
+  return <Dashboard />;
 }
