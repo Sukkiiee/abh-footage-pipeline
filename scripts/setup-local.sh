@@ -16,6 +16,27 @@ REPO_URL="https://github.com/Sukkiiee/abh-footage-pipeline.git"
 echo "== Dailies local setup =="
 echo ""
 
+# --- 0. Find Node/npm even if this shell doesn't have them on PATH yet -----
+# `curl | bash` runs in a fresh, non-interactive shell that doesn't load
+# ~/.zshrc, ~/.bashrc, etc. -- so if Node was installed via nvm or Homebrew
+# (both extremely common, and both set PATH from those files), a real,
+# already-installed Node can still be invisible to this script and get
+# wrongly reported as missing. Try the well-known install locations before
+# concluding it's actually absent.
+if ! command -v node >/dev/null 2>&1; then
+  # Official nvm way to make it available in a non-interactive script.
+  export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+  if [ -s "$NVM_DIR/nvm.sh" ]; then
+    # shellcheck disable=SC1091
+    . "$NVM_DIR/nvm.sh"
+  fi
+fi
+if ! command -v node >/dev/null 2>&1; then
+  # Homebrew's own bin dirs (Apple Silicon and Intel) aren't always on a
+  # non-interactive shell's default PATH either.
+  export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+fi
+
 # --- 1. Check prerequisites -------------------------------------------------
 # Deliberately just check-and-explain rather than silently installing system
 # packages (which would need sudo and could surprise someone) -- one clear
@@ -28,8 +49,10 @@ if ! command -v git >/dev/null 2>&1; then
 fi
 
 if ! command -v node >/dev/null 2>&1; then
-  echo "Node.js isn't installed yet."
-  echo "  Install it from https://nodejs.org (choose the LTS version), then re-run this."
+  echo "Can't find Node.js."
+  echo "  If you've genuinely never installed it: get it from https://nodejs.org (LTS version), then re-run this."
+  echo "  If you HAVE installed it before (e.g. via nvm or Homebrew) and this still shows up, open a new"
+  echo "  terminal window/tab first (so it picks up your normal setup), then re-run this from there."
   exit 1
 fi
 
