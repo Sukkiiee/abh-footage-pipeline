@@ -59,6 +59,23 @@ a limitation of this feature, it's just what "hosted" means. Local and
 Drive sources aren't mutually exclusive: run the app locally and you get
 both options side by side.
 
+**Getting it running locally, the easy way.** Open Terminal (Mac) or Git
+Bash (Windows) and paste:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Sukkiiee/abh-footage-pipeline/main/scripts/setup-local.sh | bash
+```
+
+That one line downloads the app, installs its dependencies, walks you
+through pasting in the same API keys already used for the hosted site (ask
+whoever set that up if you don't have them), and starts it at
+`http://localhost:3000` -- no manual `git clone`/`npm install`/editing
+config files needed. Requires [Node.js](https://nodejs.org) (LTS) and
+[Git](https://git-scm.com/downloads) already installed; the script tells
+you clearly if either is missing rather than guessing. Safe to run again
+later to update to the latest version -- it reuses the existing install and
+won't overwrite an `.env.local` you already have.
+
 **Off by default, on purpose.** Set `ENABLE_LOCAL_FOOTAGE=true` in
 `.env.local` to turn it on. It's disabled otherwise because the endpoint
 behind it lists and reads whatever path you give it -- fine when you're the
