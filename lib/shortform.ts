@@ -126,7 +126,17 @@ export interface ShortFormOptions {
 // no single title/logline to synthesize from the pieces): each chunk's
 // clips already stand on their own, so merging is just concatenation plus
 // the same overlap/dedupe pass already run over a single response.
-const GROQ_SAFE_TOTAL_TOKEN_BUDGET = 11000;
+// See lib/narrative.ts's identical constants for the full rationale (a real
+// production failure showed the earlier estimate/budget were miscalibrated
+// for this app's timestamp-heavy transcripts and didn't account for the
+// tool-call JSON schema's own token overhead). SINGLE_PASS_COMPLETION_TOKENS
+// is a bit higher here than narrative's equivalent -- each flagged clip's
+// schema (title options, hook, idea, payoff, rationale, counter-check,
+// caption, platform fit) is richer per-item than a narrative section, and a
+// video can reasonably flag several clips in one response.
+const GROQ_SAFE_TOTAL_TOKEN_BUDGET = 10500;
+const TOOL_SCHEMA_TOKEN_OVERHEAD = 800;
+const SINGLE_PASS_COMPLETION_TOKENS = 5000;
 const CHUNK_COMPLETION_TOKENS = 4000;
 const CHUNK_PROMPT_TOKEN_BUDGET = GROQ_SAFE_TOTAL_TOKEN_BUDGET - CHUNK_COMPLETION_TOKENS;
 
@@ -272,7 +282,8 @@ export async function extractShortFormClips(
     estimateTokens(
       buildPrompt(transcript, sourceFileName, options) + ABH_BRAND_VOICE_SYSTEM_PROMPT
     ) +
-      8000 >
+      TOOL_SCHEMA_TOKEN_OVERHEAD +
+      SINGLE_PASS_COMPLETION_TOKENS >
       GROQ_SAFE_TOTAL_TOKEN_BUDGET;
 
   if (needsChunking) {
@@ -294,7 +305,12 @@ export async function extractShortFormClips(
       options.onNotice?.(`Short-form scan part ${i + 1} of ${chunks.length} done.`);
     }
   } else {
-    const { clips, rejected } = await extractRawClips(transcript, sourceFileName, options, 8000);
+    const { clips, rejected } = await extractRawClips(
+      transcript,
+      sourceFileName,
+      options,
+      SINGLE_PASS_COMPLETION_TOKENS
+    );
     allClips = clips;
     totalRejected = rejected;
   }

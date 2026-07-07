@@ -112,7 +112,17 @@ export interface NarrativeOptions {
 // only the resulting outline, not the raw transcript again) for the
 // title/logline/themes. Anthropic's actual limits are far higher than
 // this app's transcripts realistically hit, so this only kicks in for Groq.
-const GROQ_SAFE_TOTAL_TOKEN_BUDGET = 11000;
+// A real production failure showed the token estimate (see lib/chunking.ts)
+// was too generous for this app's timestamp-heavy transcript format, and
+// that estimate also didn't account for the tool-call JSON schema itself,
+// which is real prompt-token overhead on every request. Recalibrated
+// budget/overhead below, paired with a lower default completion budget
+// (SINGLE_PASS_COMPLETION_TOKENS -- a typical narrative response is a few
+// thousand tokens at most, 8000 was needlessly generous and was itself
+// eating into the safety margin on every request).
+const GROQ_SAFE_TOTAL_TOKEN_BUDGET = 10500;
+const TOOL_SCHEMA_TOKEN_OVERHEAD = 800;
+const SINGLE_PASS_COMPLETION_TOKENS = 4000;
 const CHUNK_COMPLETION_TOKENS = 3000;
 const CHUNK_PROMPT_TOKEN_BUDGET = GROQ_SAFE_TOTAL_TOKEN_BUDGET - CHUNK_COMPLETION_TOKENS;
 
@@ -165,7 +175,7 @@ Build a structured long-form narrative for this footage for the ABH editorial an
     {
       anthropicModel: config.anthropicNarrativeModel,
       groqModel: config.groqNarrativeModel,
-      maxTokens: 8000,
+      maxTokens: SINGLE_PASS_COMPLETION_TOKENS,
       signal: options.signal,
     }
   )) as Omit<NarrativeResult, 'title' | 'titleOptions'> & { titleOptions?: unknown };
@@ -308,10 +318,11 @@ export async function generateNarrative(
   if (config.llmProvider === 'groq') {
     const transcriptText = transcriptToPromptText(transcript);
     const { briefBlock, targetLengthBlock, titleHintBlock, referenceBlock } = buildContextBlocks(options);
-    const estimatedPromptTokens = estimateTokens(
-      transcriptText + briefBlock + targetLengthBlock + titleHintBlock + referenceBlock + ABH_BRAND_VOICE_SYSTEM_PROMPT
-    );
-    if (estimatedPromptTokens + 8000 > GROQ_SAFE_TOTAL_TOKEN_BUDGET) {
+    const estimatedPromptTokens =
+      estimateTokens(
+        transcriptText + briefBlock + targetLengthBlock + titleHintBlock + referenceBlock + ABH_BRAND_VOICE_SYSTEM_PROMPT
+      ) + TOOL_SCHEMA_TOKEN_OVERHEAD;
+    if (estimatedPromptTokens + SINGLE_PASS_COMPLETION_TOKENS > GROQ_SAFE_TOTAL_TOKEN_BUDGET) {
       return chunkedGenerateNarrative(transcript, sourceFileName, options);
     }
   }

@@ -1,11 +1,21 @@
 import { Transcript, TranscriptSegment } from './types';
 
-// A rough, deliberately conservative token estimate (~4 characters per
-// token for English text) -- good enough to decide *whether* a request is
+// A rough token estimate -- good enough to decide *whether* a request is
 // at real risk of exceeding a free-tier rate limit, not meant to match
 // exact provider billing/tokenization.
+//
+// This app's transcripts are dense with "[HH:MM:SS - HH:MM:SS]" prefixes on
+// every line -- punctuation and digits tokenize less efficiently than plain
+// English words, so the often-cited "~4 chars/token for English text" rule
+// of thumb undercounts this app's actual prompts. Confirmed against a real
+// production failure where Groq reported a request as far larger than a
+// chars/4 estimate predicted. 3 chars/token is a calibrated middle ground:
+// conservative enough to catch that failure case, without being so
+// aggressive that it flags ordinary short videos as needing to chunk when
+// they don't (verified against both cases -- see the chunking decision
+// logic in lib/narrative.ts and lib/shortform.ts for the actual thresholds).
 export function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 4);
+  return Math.ceil(text.length / 3);
 }
 
 function segmentsToTranscript(segments: TranscriptSegment[]): Transcript {
@@ -24,7 +34,7 @@ function segmentsToTranscript(segments: TranscriptSegment[]): Transcript {
  * between segments, never inside one.
  */
 export function splitTranscriptIntoChunks(transcript: Transcript, maxTokensPerChunk: number): Transcript[] {
-  const maxChars = maxTokensPerChunk * 4;
+  const maxChars = maxTokensPerChunk * 3;
   const chunks: TranscriptSegment[][] = [];
   let current: TranscriptSegment[] = [];
   let currentChars = 0;
