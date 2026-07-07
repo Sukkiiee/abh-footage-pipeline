@@ -4,6 +4,7 @@ import { ABH_BRAND_VOICE_SYSTEM_PROMPT } from './brand-voice';
 import { Transcript, TranscriptSegment, ShortFormClip } from './types';
 import { transcriptToPromptText, formatTimestamp, parseTimestamp } from './whisper';
 import { formatReferenceBlock } from './reference-material';
+import { estimateTokens, splitTranscriptIntoChunks } from './chunking';
 
 const SHORTFORM_TOOL_NAME = 'submit_short_form_clips';
 
@@ -115,13 +116,26 @@ export interface ShortFormOptions {
   referenceMaterial?: string;
   /** Aborts the in-flight LLM request immediately if the pipeline is stopped mid-call. */
   signal?: AbortSignal;
+  /** Called once, only if this transcript is long enough to need splitting into multiple requests -- lets the caller surface a plain-language heads-up to the user before it happens. */
+  onNotice?: (message: string) => void;
 }
 
-export async function extractShortFormClips(
+// See lib/narrative.ts for the full rationale -- same Groq free-tier
+// tokens-per-minute ceiling, same chunk-and-merge fix. Short-form flagging
+// doesn't need a separate "finalize" pass the way narrative does (there's
+// no single title/logline to synthesize from the pieces): each chunk's
+// clips already stand on their own, so merging is just concatenation plus
+// the same overlap/dedupe pass already run over a single response.
+const GROQ_SAFE_TOTAL_TOKEN_BUDGET = 11000;
+const CHUNK_COMPLETION_TOKENS = 4000;
+const CHUNK_PROMPT_TOKEN_BUDGET = GROQ_SAFE_TOTAL_TOKEN_BUDGET - CHUNK_COMPLETION_TOKENS;
+
+function buildPrompt(
   transcript: Transcript,
   sourceFileName: string,
-  options: ShortFormOptions = {}
-): Promise<{ clips: ShortFormClip[]; rejected: number }> {
+  options: ShortFormOptions,
+  chunkInfo?: { index: number; total: number }
+): string {
   const transcriptText = transcriptToPromptText(transcript);
   const totalDuration = formatTimestamp(transcript.durationSec);
 
@@ -135,10 +149,14 @@ export async function extractShortFormClips(
 
   const referenceBlock = formatReferenceBlock(options.referenceMaterial);
 
-  const userPrompt = `Source footage: "${sourceFileName}"
+  const chunkNote = chunkInfo
+    ? `\nThis is part ${chunkInfo.index + 1} of ${chunkInfo.total} of one longer transcript (split only because of a request-size limit, not a real break in the footage). Only flag clips fully contained within this part.\n`
+    : '';
+
+  return `Source footage: "${sourceFileName}"
 Total duration: ${totalDuration}
-${briefBlock}${titleBlock}${referenceBlock}
-Below is the full timestamped transcript of the raw footage.
+${briefBlock}${titleBlock}${referenceBlock}${chunkNote}
+Below is the ${chunkInfo ? `part ${chunkInfo.index + 1}/${chunkInfo.total} of the` : 'full'} timestamped transcript of the raw footage.
 
 ---TRANSCRIPT START---
 ${transcriptText}
@@ -153,6 +171,17 @@ Flag only moments in this footage that would genuinely work as a standalone shor
 - Before finalizing each clip, argue against it in the counterCheck field. If the honest answer is "this is actually kind of weak," leave it out. It is always better to return three strong clips than eight mediocre ones.
 
 Use exact timestamps from the transcript above for startTimestamp and endTimestamp. Do not flag overlapping clips. Return as many strong candidates as the footage actually supports, which may be very few or none; do not force weak ones in just to hit a number. For each clip, propose several distinct title options rather than settling on one. Use the submit_short_form_clips tool to return your result.`;
+}
+
+/** Runs one LLM call (for the whole transcript, or one chunk of it) and parses/validates its raw clip candidates against that same transcript's segments -- but doesn't do the final cross-chunk overlap/sort pass, since that has to happen once over everything combined. */
+async function extractRawClips(
+  transcript: Transcript,
+  sourceFileName: string,
+  options: ShortFormOptions,
+  maxTokens: number,
+  chunkInfo?: { index: number; total: number }
+): Promise<{ clips: ShortFormClip[]; rejected: number }> {
+  const userPrompt = buildPrompt(transcript, sourceFileName, options, chunkInfo);
 
   const result = await generateStructuredJSON(
     ABH_BRAND_VOICE_SYSTEM_PROMPT,
@@ -165,7 +194,7 @@ Use exact timestamps from the transcript above for startTimestamp and endTimesta
     {
       anthropicModel: config.anthropicShortFormModel,
       groqModel: config.groqShortFormModel,
-      maxTokens: 8000,
+      maxTokens,
       signal: options.signal,
     }
   );
@@ -227,18 +256,64 @@ Use exact timestamps from the transcript above for startTimestamp and endTimesta
     });
   }
 
-  // Sort chronologically and drop any that overlap a previously accepted clip.
-  clips.sort((a, b) => a.startSec - b.startSec);
+  return { clips, rejected };
+}
+
+export async function extractShortFormClips(
+  transcript: Transcript,
+  sourceFileName: string,
+  options: ShortFormOptions = {}
+): Promise<{ clips: ShortFormClip[]; rejected: number }> {
+  let allClips: ShortFormClip[] = [];
+  let totalRejected = 0;
+
+  const needsChunking =
+    config.llmProvider === 'groq' &&
+    estimateTokens(
+      buildPrompt(transcript, sourceFileName, options) + ABH_BRAND_VOICE_SYSTEM_PROMPT
+    ) +
+      8000 >
+      GROQ_SAFE_TOTAL_TOKEN_BUDGET;
+
+  if (needsChunking) {
+    options.onNotice?.(
+      "This video's transcript is long enough that flagging short-form clips in one request would go over Groq's free-tier limit. It's being split into smaller parts and the results combined afterward -- this takes a bit longer. To avoid this, use shorter footage, or switch LLM_PROVIDER to anthropic in your environment."
+    );
+
+    const chunks = splitTranscriptIntoChunks(transcript, CHUNK_PROMPT_TOKEN_BUDGET);
+    for (let i = 0; i < chunks.length; i++) {
+      const { clips, rejected } = await extractRawClips(
+        chunks[i],
+        sourceFileName,
+        options,
+        CHUNK_COMPLETION_TOKENS,
+        { index: i, total: chunks.length }
+      );
+      allClips.push(...clips);
+      totalRejected += rejected;
+      options.onNotice?.(`Short-form scan part ${i + 1} of ${chunks.length} done.`);
+    }
+  } else {
+    const { clips, rejected } = await extractRawClips(transcript, sourceFileName, options, 8000);
+    allClips = clips;
+    totalRejected = rejected;
+  }
+
+  // Sort chronologically and drop any that overlap a previously accepted
+  // clip -- run once over everything, whether it came from one call or
+  // several chunked ones, since two different chunks' clips could still
+  // overlap right at a chunk boundary.
+  allClips.sort((a, b) => a.startSec - b.startSec);
   const nonOverlapping: ShortFormClip[] = [];
   let lastEnd = -Infinity;
-  for (const clip of clips) {
+  for (const clip of allClips) {
     if (clip.startSec >= lastEnd) {
       nonOverlapping.push(clip);
       lastEnd = clip.endSec;
     } else {
-      rejected++;
+      totalRejected++;
     }
   }
 
-  return { clips: nonOverlapping, rejected };
+  return { clips: nonOverlapping, rejected: totalRejected };
 }

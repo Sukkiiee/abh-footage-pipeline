@@ -1,9 +1,10 @@
 import { config } from './config';
 import { generateStructuredJSON } from './llm';
 import { ABH_BRAND_VOICE_SYSTEM_PROMPT } from './brand-voice';
-import { Transcript, NarrativeResult } from './types';
+import { Transcript, NarrativeResult, NarrativeSection } from './types';
 import { transcriptToPromptText, formatTimestamp } from './whisper';
 import { formatReferenceBlock } from './reference-material';
+import { estimateTokens, splitTranscriptIntoChunks } from './chunking';
 
 const NARRATIVE_TOOL_NAME = 'submit_narrative';
 
@@ -68,6 +69,24 @@ const NARRATIVE_TOOL = {
   },
 };
 
+// Used only for the interim, per-chunk calls a long transcript gets split
+// into (see chunkedGenerateNarrative below) -- these only need to produce
+// sections for their slice of the transcript, not a title/logline for the
+// whole video, so the schema (and therefore the prompt+response token
+// footprint) stays deliberately small.
+const NARRATIVE_SECTIONS_TOOL_NAME = 'submit_narrative_sections';
+const NARRATIVE_SECTIONS_TOOL = {
+  name: NARRATIVE_SECTIONS_TOOL_NAME,
+  description: 'Submit narrative sections/beats built from this slice of a longer transcript.',
+  schema: {
+    type: 'object' as const,
+    properties: {
+      sections: NARRATIVE_TOOL.schema.properties.sections,
+    },
+    required: ['sections'],
+  },
+};
+
 export interface NarrativeOptions {
   /** Free-text producer/editorial brief -- context, angle, or instructions for this specific piece. */
   brief?: string;
@@ -79,16 +98,25 @@ export interface NarrativeOptions {
   referenceMaterial?: string;
   /** Aborts the in-flight LLM request immediately if the pipeline is stopped mid-call. */
   signal?: AbortSignal;
+  /** Called once, only if this transcript is long enough to need splitting into multiple requests -- lets the caller surface a plain-language heads-up to the user before it happens. */
+  onNotice?: (message: string) => void;
 }
 
-export async function generateNarrative(
-  transcript: Transcript,
-  sourceFileName: string,
-  options: NarrativeOptions = {}
-): Promise<NarrativeResult> {
-  const transcriptText = transcriptToPromptText(transcript);
-  const totalDuration = formatTimestamp(transcript.durationSec);
+// Groq's free tier hard-caps at 12,000 tokens/minute (prompt + completion,
+// combined) for the models this app uses -- confirmed in production. A
+// single request for a long video's full transcript can exceed that on its
+// own, in which case no amount of retrying with a smaller completion
+// budget helps (the prompt alone is already over the ceiling). Rather than
+// just failing, split the transcript into pieces that each safely fit,
+// generate sections for each piece, then do one small finalize call (using
+// only the resulting outline, not the raw transcript again) for the
+// title/logline/themes. Anthropic's actual limits are far higher than
+// this app's transcripts realistically hit, so this only kicks in for Groq.
+const GROQ_SAFE_TOTAL_TOKEN_BUDGET = 11000;
+const CHUNK_COMPLETION_TOKENS = 3000;
+const CHUNK_PROMPT_TOKEN_BUDGET = GROQ_SAFE_TOTAL_TOKEN_BUDGET - CHUNK_COMPLETION_TOKENS;
 
+function buildContextBlocks(options: NarrativeOptions) {
   const briefBlock = options.brief?.trim()
     ? `\nProducer brief for this piece:\n${options.brief.trim()}\n\nFollow this brief for angle, emphasis, and framing wherever it doesn't conflict with what's actually present in the transcript. Do not invent content the brief implies but the transcript doesn't support.\n`
     : '';
@@ -102,6 +130,18 @@ export async function generateNarrative(
     : '';
 
   const referenceBlock = formatReferenceBlock(options.referenceMaterial);
+
+  return { briefBlock, targetLengthBlock, titleHintBlock, referenceBlock };
+}
+
+async function generateNarrativeSinglePass(
+  transcript: Transcript,
+  sourceFileName: string,
+  options: NarrativeOptions
+): Promise<NarrativeResult> {
+  const transcriptText = transcriptToPromptText(transcript);
+  const totalDuration = formatTimestamp(transcript.durationSec);
+  const { briefBlock, targetLengthBlock, titleHintBlock, referenceBlock } = buildContextBlocks(options);
 
   const userPrompt = `Source footage: "${sourceFileName}"
 Total duration: ${totalDuration}
@@ -145,4 +185,136 @@ Build a structured long-form narrative for this footage for the ABH editorial an
     titleOptions,
     title: titleOptions[0],
   };
+}
+
+async function generateSectionsForChunk(
+  chunk: Transcript,
+  sourceFileName: string,
+  options: NarrativeOptions,
+  chunkIndex: number,
+  totalChunks: number
+): Promise<NarrativeSection[]> {
+  const transcriptText = transcriptToPromptText(chunk);
+  const { briefBlock, targetLengthBlock, titleHintBlock, referenceBlock } = buildContextBlocks(options);
+
+  const userPrompt = `Source footage: "${sourceFileName}"
+This is part ${chunkIndex + 1} of ${totalChunks} of one longer transcript (split only because of a request-size limit, not a real break in the footage).
+${briefBlock}${targetLengthBlock}${titleHintBlock}${referenceBlock}
+Below is this part's slice of the timestamped transcript. Each line is [start - end] followed by what was said.
+
+---TRANSCRIPT PART ${chunkIndex + 1}/${totalChunks} START---
+${transcriptText}
+---TRANSCRIPT PART ${chunkIndex + 1}/${totalChunks} END---
+
+Build narrative sections/beats covering ONLY this part of the footage, in the ABH brand voice, in chronological order. Do not summarize the whole video or guess at what's in other parts. Every section must cite the specific transcript timestamp range(s) it draws from, taken directly from this part. Do not invent content not present in this part. Do not propose a title -- a separate pass handles that once every part is combined. Use the submit_narrative_sections tool to return your result.`;
+
+  const raw = (await generateStructuredJSON(
+    ABH_BRAND_VOICE_SYSTEM_PROMPT,
+    userPrompt,
+    {
+      name: NARRATIVE_SECTIONS_TOOL.name,
+      description: NARRATIVE_SECTIONS_TOOL.description,
+      schema: NARRATIVE_SECTIONS_TOOL.schema,
+    },
+    {
+      anthropicModel: config.anthropicNarrativeModel,
+      groqModel: config.groqNarrativeModel,
+      maxTokens: CHUNK_COMPLETION_TOKENS,
+      signal: options.signal,
+    }
+  )) as { sections?: NarrativeSection[] };
+
+  return Array.isArray(raw.sections) ? raw.sections : [];
+}
+
+/** Finalizes title/logline/themes/closing line from an already-built outline (section headings + narrative text), not the raw transcript -- kept intentionally small regardless of how long the source video was. */
+async function finalizeFromOutline(
+  sections: NarrativeSection[],
+  sourceFileName: string,
+  options: NarrativeOptions
+): Promise<Omit<NarrativeResult, 'sections'>> {
+  const { titleHintBlock } = buildContextBlocks(options);
+  const outline = sections
+    .map((s, i) => `${i + 1}. ${s.heading}\n${s.narrative}`)
+    .join('\n\n');
+
+  const userPrompt = `Source footage: "${sourceFileName}"
+${titleHintBlock}
+Below is the narrative outline already built for this footage (section headings and prose), assembled from a longer transcript that was processed in parts.
+
+---OUTLINE START---
+${outline}
+---OUTLINE END---
+
+Based on this outline, propose title options, a one-sentence logline, 2-5 theme labels, and an optional closing line, all in the ABH brand voice. Use the submit_narrative tool to return your result (the "sections" field can be left empty; it's already built separately).`;
+
+  const raw = (await generateStructuredJSON(
+    ABH_BRAND_VOICE_SYSTEM_PROMPT,
+    userPrompt,
+    {
+      name: NARRATIVE_TOOL.name,
+      description: NARRATIVE_TOOL.description,
+      schema: NARRATIVE_TOOL.schema,
+    },
+    {
+      anthropicModel: config.anthropicNarrativeModel,
+      groqModel: config.groqNarrativeModel,
+      maxTokens: 1500,
+      signal: options.signal,
+    }
+  )) as Omit<NarrativeResult, 'title' | 'titleOptions' | 'sections'> & { titleOptions?: unknown };
+
+  const titleOptions = Array.isArray(raw.titleOptions)
+    ? raw.titleOptions.map((t) => String(t)).filter((t) => t.trim().length > 0)
+    : [];
+  if (titleOptions.length === 0) {
+    titleOptions.push(`${sourceFileName.replace(/\.[^/.]+$/, '')} - ABH Story`);
+  }
+
+  return { ...raw, titleOptions, title: titleOptions[0] };
+}
+
+async function chunkedGenerateNarrative(
+  transcript: Transcript,
+  sourceFileName: string,
+  options: NarrativeOptions
+): Promise<NarrativeResult> {
+  options.onNotice?.(
+    "This video's transcript is long enough that building the narrative in one request would go over Groq's free-tier limit. It's being split into smaller parts and combined afterward. This takes a bit longer, and the result may read as slightly more segmented than a single-pass narrative. To avoid this, use shorter footage, or switch LLM_PROVIDER to anthropic in your environment."
+  );
+
+  const chunks = splitTranscriptIntoChunks(transcript, CHUNK_PROMPT_TOKEN_BUDGET);
+  const allSections: NarrativeSection[] = [];
+  for (let i = 0; i < chunks.length; i++) {
+    const sections = await generateSectionsForChunk(chunks[i], sourceFileName, options, i, chunks.length);
+    allSections.push(...sections);
+    options.onNotice?.(`Narrative part ${i + 1} of ${chunks.length} done.`);
+  }
+
+  options.onNotice?.('Combining all parts into one narrative...');
+  const finalized = await finalizeFromOutline(allSections, sourceFileName, options);
+  return { ...finalized, sections: allSections };
+}
+
+export async function generateNarrative(
+  transcript: Transcript,
+  sourceFileName: string,
+  options: NarrativeOptions = {}
+): Promise<NarrativeResult> {
+  // Only Groq has a rate limit tight enough for this app's transcripts to
+  // realistically hit -- estimate this the same rough way the ceiling
+  // itself is denominated (prompt + completion tokens together) before
+  // ever making a request, rather than waiting to fail and retry.
+  if (config.llmProvider === 'groq') {
+    const transcriptText = transcriptToPromptText(transcript);
+    const { briefBlock, targetLengthBlock, titleHintBlock, referenceBlock } = buildContextBlocks(options);
+    const estimatedPromptTokens = estimateTokens(
+      transcriptText + briefBlock + targetLengthBlock + titleHintBlock + referenceBlock + ABH_BRAND_VOICE_SYSTEM_PROMPT
+    );
+    if (estimatedPromptTokens + 8000 > GROQ_SAFE_TOTAL_TOKEN_BUDGET) {
+      return chunkedGenerateNarrative(transcript, sourceFileName, options);
+    }
+  }
+
+  return generateNarrativeSinglePass(transcript, sourceFileName, options);
 }

@@ -284,6 +284,7 @@ export async function POST(req: NextRequest) {
         titleHint,
         referenceMaterial,
         signal,
+        onNotice: (message) => sse.send('progress', { stage: 'narrative', message, percent: 60 }),
       });
 
       if (jobId) await checkpoint(jobId);
@@ -299,6 +300,7 @@ export async function POST(req: NextRequest) {
         videoTitle: narrative.title,
         referenceMaterial,
         signal,
+        onNotice: (message) => sse.send('progress', { stage: 'shortform', message, percent: 75 }),
       });
 
       if (jobId) await checkpoint(jobId);
