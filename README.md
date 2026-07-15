@@ -83,6 +83,30 @@ only person who can reach your own local instance, but a real
 path-disclosure risk if it were ever exposed on a shared hosted deployment.
 Never enable it there.
 
+## Choosing an LLM provider (Groq / Anthropic / Auto)
+
+Every run can use Groq (free), Anthropic (paid, always works), or Auto --
+pick per run from the "AI provider" dropdown in Run options, or set a
+default with `LLM_PROVIDER` in your environment (see `.env.example`).
+
+**Auto is the recommended default.** It tries Groq first at no cost. Only
+if a video's transcript is too large for Groq's free-tier rate limit does
+it do anything different -- and even then, it doesn't silently switch to a
+paid provider. It pauses the run, shows a real cost estimate (computed from
+the actual transcript size, using Anthropic's current per-token pricing) in
+the UI, and waits for you to approve or decline. Decline and it falls back
+to Groq's free chunked path instead (slower, split into pieces, but still
+free) -- you're never charged without an explicit yes on that specific run.
+
+**Cost is real but small.** A typical run is roughly $0.10-$0.15 on
+Anthropic; a long video that needs splitting is more like $0.25-$0.45.
+There's also a hard daily spend cap (`ANTHROPIC_DAILY_SPEND_CAP_USD`,
+default $5) enforced before every single Anthropic call regardless of how
+it was reached -- the actual protection against a runaway bill if several
+people are testing the app at once. Tracked in a local `.anthropic-usage.json`
+file (gitignored, resets daily); raise the cap in your environment if you
+want more daily headroom.
+
 ## Stack
 
 Next.js 14 (App Router) · googleapis · OpenAI SDK pointed at Groq's free-tier Whisper endpoint (transcription) · a provider-agnostic LLM layer defaulting to Groq's free-tier Llama models, switchable to Anthropic's Claude SDK via one env var (narrative + short-form generation) · fluent-ffmpeg + ffmpeg-static/@ffprobe-installer/ffprobe · `docx`. No database: the Google OAuth tokens and connected folder are stored in a single encrypted, httpOnly cookie. Whether a file has already been processed is tracked client-side (`localStorage`) so it survives across sessions in that browser.

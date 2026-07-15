@@ -5,6 +5,7 @@ import { Transcript, TranscriptSegment, ShortFormClip } from './types';
 import { transcriptToPromptText, formatTimestamp, parseTimestamp } from './whisper';
 import { formatReferenceBlock } from './reference-material';
 import { estimateTokens, splitTranscriptIntoChunks } from './chunking';
+import { estimateCostUSD } from './anthropic-usage';
 
 const SHORTFORM_TOOL_NAME = 'submit_short_form_clips';
 
@@ -118,6 +119,10 @@ export interface ShortFormOptions {
   signal?: AbortSignal;
   /** Called once, only if this transcript is long enough to need splitting into multiple requests -- lets the caller surface a plain-language heads-up to the user before it happens. */
   onNotice?: (message: string) => void;
+  /** Per-run provider choice from the UI; overrides config.llmProvider when set. */
+  llmProviderMode?: 'groq' | 'anthropic' | 'auto';
+  /** See lib/narrative.ts's identical option -- only used in 'auto' mode, asks the user to approve the estimated Anthropic cost before ever spending anything; declining (or omitting this) falls back to Groq's free chunked path. */
+  requestApproval?: (estimatedCostUSD: number) => Promise<'approve' | 'deny'>;
 }
 
 // See lib/narrative.ts for the full rationale -- same Groq free-tier
@@ -189,6 +194,7 @@ async function extractRawClips(
   sourceFileName: string,
   options: ShortFormOptions,
   maxTokens: number,
+  provider: 'groq' | 'anthropic',
   chunkInfo?: { index: number; total: number }
 ): Promise<{ clips: ShortFormClip[]; rejected: number }> {
   const userPrompt = buildPrompt(transcript, sourceFileName, options, chunkInfo);
@@ -206,6 +212,7 @@ async function extractRawClips(
       groqModel: config.groqShortFormModel,
       maxTokens,
       signal: options.signal,
+      provider,
     }
   );
 
@@ -269,51 +276,89 @@ async function extractRawClips(
   return { clips, rejected };
 }
 
+async function chunkedExtractShortFormClips(
+  transcript: Transcript,
+  sourceFileName: string,
+  options: ShortFormOptions
+): Promise<{ clips: ShortFormClip[]; rejected: number }> {
+  options.onNotice?.(
+    "This video's transcript is long enough that flagging short-form clips in one request would go over Groq's free-tier limit. It's being split into smaller parts and the results combined afterward -- this takes a bit longer. To avoid this, use shorter footage, or switch LLM_PROVIDER to anthropic in your environment."
+  );
+
+  const allClips: ShortFormClip[] = [];
+  let totalRejected = 0;
+  const chunks = splitTranscriptIntoChunks(transcript, CHUNK_PROMPT_TOKEN_BUDGET);
+  for (let i = 0; i < chunks.length; i++) {
+    const { clips, rejected } = await extractRawClips(
+      chunks[i],
+      sourceFileName,
+      options,
+      CHUNK_COMPLETION_TOKENS,
+      'groq',
+      { index: i, total: chunks.length }
+    );
+    allClips.push(...clips);
+    totalRejected += rejected;
+    options.onNotice?.(`Short-form scan part ${i + 1} of ${chunks.length} done.`);
+  }
+  return { clips: allClips, rejected: totalRejected };
+}
+
+async function resolveClips(
+  transcript: Transcript,
+  sourceFileName: string,
+  options: ShortFormOptions,
+  mode: 'groq' | 'anthropic' | 'auto'
+): Promise<{ clips: ShortFormClip[]; rejected: number }> {
+  if (mode === 'anthropic') {
+    return extractRawClips(transcript, sourceFileName, options, SINGLE_PASS_COMPLETION_TOKENS, 'anthropic');
+  }
+
+  const estimatedPromptTokens =
+    estimateTokens(buildPrompt(transcript, sourceFileName, options) + ABH_BRAND_VOICE_SYSTEM_PROMPT) +
+    TOOL_SCHEMA_TOKEN_OVERHEAD;
+  const fitsGroq = estimatedPromptTokens + SINGLE_PASS_COMPLETION_TOKENS <= GROQ_SAFE_TOTAL_TOKEN_BUDGET;
+
+  if (fitsGroq) {
+    return extractRawClips(transcript, sourceFileName, options, SINGLE_PASS_COMPLETION_TOKENS, 'groq');
+  }
+
+  if (mode === 'groq') {
+    return chunkedExtractShortFormClips(transcript, sourceFileName, options);
+  }
+
+  // mode === 'auto', doesn't fit Groq: offer Anthropic with a real
+  // cost-approval step, falling back to Groq's free chunked path if it's
+  // not configured or the user declines.
+  if (config.hasAnthropicKey && options.requestApproval) {
+    const estimatedCostUSD = estimateCostUSD(
+      config.anthropicShortFormModel,
+      estimatedPromptTokens,
+      SINGLE_PASS_COMPLETION_TOKENS
+    );
+    const decision = await options.requestApproval(estimatedCostUSD);
+    if (decision === 'approve') {
+      return extractRawClips(transcript, sourceFileName, options, SINGLE_PASS_COMPLETION_TOKENS, 'anthropic');
+    }
+  }
+
+  return chunkedExtractShortFormClips(transcript, sourceFileName, options);
+}
+
 export async function extractShortFormClips(
   transcript: Transcript,
   sourceFileName: string,
   options: ShortFormOptions = {}
 ): Promise<{ clips: ShortFormClip[]; rejected: number }> {
-  let allClips: ShortFormClip[] = [];
-  let totalRejected = 0;
-
-  const needsChunking =
-    config.llmProvider === 'groq' &&
-    estimateTokens(
-      buildPrompt(transcript, sourceFileName, options) + ABH_BRAND_VOICE_SYSTEM_PROMPT
-    ) +
-      TOOL_SCHEMA_TOKEN_OVERHEAD +
-      SINGLE_PASS_COMPLETION_TOKENS >
-      GROQ_SAFE_TOTAL_TOKEN_BUDGET;
-
-  if (needsChunking) {
-    options.onNotice?.(
-      "This video's transcript is long enough that flagging short-form clips in one request would go over Groq's free-tier limit. It's being split into smaller parts and the results combined afterward -- this takes a bit longer. To avoid this, use shorter footage, or switch LLM_PROVIDER to anthropic in your environment."
-    );
-
-    const chunks = splitTranscriptIntoChunks(transcript, CHUNK_PROMPT_TOKEN_BUDGET);
-    for (let i = 0; i < chunks.length; i++) {
-      const { clips, rejected } = await extractRawClips(
-        chunks[i],
-        sourceFileName,
-        options,
-        CHUNK_COMPLETION_TOKENS,
-        { index: i, total: chunks.length }
-      );
-      allClips.push(...clips);
-      totalRejected += rejected;
-      options.onNotice?.(`Short-form scan part ${i + 1} of ${chunks.length} done.`);
-    }
-  } else {
-    const { clips, rejected } = await extractRawClips(
-      transcript,
-      sourceFileName,
-      options,
-      SINGLE_PASS_COMPLETION_TOKENS
-    );
-    allClips = clips;
-    totalRejected = rejected;
-  }
+  const mode = options.llmProviderMode ?? config.llmProvider;
+  const { clips: resolvedClips, rejected: resolvedRejected } = await resolveClips(
+    transcript,
+    sourceFileName,
+    options,
+    mode
+  );
+  const allClips = resolvedClips;
+  let totalRejected = resolvedRejected;
 
   // Sort chronologically and drop any that overlap a previously accepted
   // clip -- run once over everything, whether it came from one call or

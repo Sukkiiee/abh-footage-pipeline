@@ -1,12 +1,12 @@
 import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
 import { config } from './config';
+import { getTodaySpendUSD, recordSpendUSD, estimateCostUSD } from './anthropic-usage';
 
 // Provider-agnostic "force a structured JSON tool call" helper. narrative.ts
 // and shortform.ts both call this instead of talking to Anthropic or Groq
 // directly, so the rest of the pipeline (validation, FCPXML/DOCX building)
-// never needs to know which LLM actually produced the JSON. Switching
-// providers is a config change (config.llmProvider), not a code change.
+// never needs to know which LLM actually produced the JSON.
 
 export interface StructuredToolSpec {
   name: string;
@@ -20,6 +20,13 @@ export interface GenerateStructuredOptions {
   groqModel: string;
   maxTokens?: number;
   signal?: AbortSignal;
+  /**
+   * Which provider to actually use for this call. Callers resolve 'auto'
+   * down to a concrete 'groq' or 'anthropic' before calling this function
+   * (see lib/narrative.ts / lib/shortform.ts's resolveProvider) -- this
+   * function only ever sees a real choice, never has to guess.
+   */
+  provider: 'groq' | 'anthropic';
 }
 
 export async function generateStructuredJSON(
@@ -30,7 +37,7 @@ export async function generateStructuredJSON(
 ): Promise<unknown> {
   const maxTokens = opts.maxTokens ?? 8000;
 
-  if (config.llmProvider === 'anthropic') {
+  if (opts.provider === 'anthropic') {
     return generateViaAnthropic(systemPrompt, userPrompt, tool, opts.anthropicModel, maxTokens, opts.signal);
   }
   return generateViaGroq(systemPrompt, userPrompt, tool, opts.groqModel, maxTokens, opts.signal);
@@ -44,6 +51,21 @@ async function generateViaAnthropic(
   maxTokens: number,
   signal?: AbortSignal
 ): Promise<unknown> {
+  // The actual real-money safety net: enforced right before every single
+  // Anthropic call, regardless of how that call was reached (an explicit
+  // per-run "Anthropic only" choice, or an approved Auto-mode switch) --
+  // so a shared/hosted instance can't run up an unbounded bill even if
+  // several people are testing it at once. Checked against spend already
+  // recorded from completed calls, not a pre-estimate, so this can't
+  // itself block a request based on a guess; it can only stop *further*
+  // calls once real spend has actually reached the cap.
+  const spentToday = getTodaySpendUSD();
+  if (spentToday >= config.anthropicDailySpendCapUSD) {
+    throw new Error(
+      `Daily Anthropic spend cap of $${config.anthropicDailySpendCapUSD.toFixed(2)} reached (used $${spentToday.toFixed(2)} today). Wait until tomorrow, raise ANTHROPIC_DAILY_SPEND_CAP_USD in your environment, or use Groq instead.`
+    );
+  }
+
   const client = new Anthropic({ apiKey: config.anthropicApiKey });
 
   const response = await client.messages.create(
@@ -64,6 +86,10 @@ async function generateViaAnthropic(
     },
     { signal }
   );
+
+  if (response.usage) {
+    recordSpendUSD(estimateCostUSD(model, response.usage.input_tokens, response.usage.output_tokens));
+  }
 
   const toolUse = response.content.find((block) => block.type === 'tool_use') as
     | { type: 'tool_use'; input: unknown }

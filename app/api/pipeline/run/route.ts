@@ -20,7 +20,7 @@ import { buildNarrativeDocx } from '@/lib/docx-export';
 import { buildSrt } from '@/lib/srt';
 import { writeSession } from '@/lib/session';
 import { config } from '@/lib/config';
-import { createJob, removeJob, checkpoint, getJobSignal } from '@/lib/job-control';
+import { createJob, removeJob, checkpoint, getJobSignal, waitForApproval } from '@/lib/job-control';
 import { SessionData } from '@/lib/types';
 
 // This route runs the entire pipeline (download -> ffmpeg -> Whisper ->
@@ -70,6 +70,7 @@ export async function POST(req: NextRequest) {
   let referenceMaterial: string | undefined;
   let targetLengthMinutes: number | undefined;
   let jobId: string | undefined;
+  let llmProviderMode: 'groq' | 'anthropic' | 'auto' | undefined;
 
   try {
     const body = await req.json();
@@ -91,6 +92,10 @@ export async function POST(req: NextRequest) {
     titleHint = body.titleHint ? String(body.titleHint) : undefined;
     referenceMaterial = body.referenceMaterial ? String(body.referenceMaterial) : undefined;
     jobId = body.jobId ? String(body.jobId) : undefined;
+    llmProviderMode =
+      body.llmProviderMode === 'groq' || body.llmProviderMode === 'anthropic' || body.llmProviderMode === 'auto'
+        ? body.llmProviderMode
+        : undefined;
 
     if (body.targetLengthMinutes !== undefined && body.targetLengthMinutes !== null && body.targetLengthMinutes !== '') {
       const parsed = Number(body.targetLengthMinutes);
@@ -166,6 +171,24 @@ export async function POST(req: NextRequest) {
 
   const stream = createSseStream(async (sse) => {
     const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'abh-'));
+
+    // Only meaningful in 'auto' provider mode, and only once a transcript
+    // turns out too large for Groq's free-tier limits: sends a real cost
+    // estimate over SSE and blocks until the client answers via
+    // /api/pipeline/control's approve/deny actions (see lib/job-control.ts).
+    // No jobId (an older/ad-hoc caller) means there's no way to answer this
+    // mid-stream, so it's simply not offered -- generateNarrative/
+    // extractShortFormClips fall back to Groq's free chunked path whenever
+    // this is undefined, never spending anything without it.
+    const requestApproval = jobId
+      ? async (estimatedCostUSD: number) => {
+          sse.send('approval-required', {
+            estimatedCostUSD,
+            message: `This video is large enough that Groq's free tier can't process it in one go. Switching to Anthropic for this step would cost approximately $${estimatedCostUSD.toFixed(2)}.`,
+          });
+          return waitForApproval(jobId!);
+        }
+      : undefined;
 
     try {
       let sourceFileName: string;
@@ -294,6 +317,8 @@ export async function POST(req: NextRequest) {
         titleHint,
         referenceMaterial,
         signal,
+        llmProviderMode,
+        requestApproval,
         onNotice: (message) => sse.send('progress', { stage: 'narrative', message, percent: 60 }),
       });
 
@@ -310,6 +335,8 @@ export async function POST(req: NextRequest) {
         videoTitle: narrative.title,
         referenceMaterial,
         signal,
+        llmProviderMode,
+        requestApproval,
         onNotice: (message) => sse.send('progress', { stage: 'shortform', message, percent: 75 }),
       });
 

@@ -440,6 +440,13 @@ export default function Dashboard() {
   const [brief, setBrief] = useState('');
   const [targetLengthMinutes, setTargetLengthMinutes] = useState('');
   const [useCustomLength, setUseCustomLength] = useState(false);
+  // 'auto' tries Groq first (free) and only offers to switch to Anthropic
+  // (with a cost-approval prompt) when a video is too large for Groq's
+  // free-tier limits -- see the 'approval-required' SSE handling below.
+  const [llmProviderChoice, setLlmProviderChoice] = useState<'groq' | 'anthropic' | 'auto'>('auto');
+  const [pendingApproval, setPendingApproval] = useState<{ estimatedCostUSD: number; message: string } | null>(
+    null
+  );
   const [driveLinkInput, setDriveLinkInput] = useState('');
   const [referenceDocs, setReferenceDocs] = useState<ReferenceDoc[]>([]);
   const [referenceUploadBusy, setReferenceUploadBusy] = useState(false);
@@ -687,6 +694,7 @@ export default function Dashboard() {
     setElapsedSeconds(0);
     setEstimatedTotalSeconds(target.sizeBytes ? estimateDurationSeconds(target.sizeBytes) : null);
     setLiveTranscriptLines([]);
+    setPendingApproval(null);
     setView('processing');
 
     const jobId =
@@ -711,6 +719,7 @@ export default function Dashboard() {
           brief: brief || undefined,
           referenceMaterial: buildReferenceMaterial(),
           jobId,
+          llmProviderMode: llmProviderChoice,
           targetLengthMinutes:
             parsedTargetLength && Number.isFinite(parsedTargetLength) && parsedTargetLength > 0
               ? parsedTargetLength
@@ -764,6 +773,8 @@ export default function Dashboard() {
             if (progressEvent.transcriptLines && progressEvent.transcriptLines.length > 0) {
               setLiveTranscriptLines(progressEvent.transcriptLines);
             }
+          } else if (eventName === 'approval-required') {
+            setPendingApproval(data as { estimatedCostUSD: number; message: string });
           } else if (eventName === 'done') {
             receivedTerminalEvent = true;
             // completedAt/runtimeSec aren't sent by the server -- attached
@@ -812,10 +823,11 @@ export default function Dashboard() {
       setRunningFileId(null);
       setCurrentJobId(null);
       setPaused(false);
+      setPendingApproval(null);
     }
   }
 
-  async function sendPipelineControl(action: 'pause' | 'resume' | 'stop') {
+  async function sendPipelineControl(action: 'pause' | 'resume' | 'stop' | 'approve' | 'deny') {
     if (!currentJobId) return;
     setControlBusy(true);
     try {
@@ -831,6 +843,7 @@ export default function Dashboard() {
       }
       if (action === 'pause') setPaused(true);
       if (action === 'resume') setPaused(false);
+      if (action === 'approve' || action === 'deny') setPendingApproval(null);
       // 'stop' leaves paused/runningFileId as-is; the running request will
       // surface a clean "Pipeline stopped by user." error event shortly,
       // which resets everything via runPipeline's own finally block.
@@ -1302,6 +1315,22 @@ export default function Dashboard() {
                 </div>
 
                 <div className="field">
+                  <label>AI provider</label>
+                  <select
+                    value={llmProviderChoice}
+                    onChange={(e) => setLlmProviderChoice(e.target.value as 'groq' | 'anthropic' | 'auto')}
+                  >
+                    <option value="auto">Auto: Groq first, ask before using Anthropic</option>
+                    <option value="groq">Groq only (free, may need to split up long videos)</option>
+                    <option value="anthropic">Anthropic only (paid, ~$0.10-0.45/video, always works)</option>
+                  </select>
+                  <div className="hint">
+                    Auto asks you to approve the estimated cost before ever switching to Anthropic --
+                    declining keeps it on Groq for free, just slower for long videos.
+                  </div>
+                </div>
+
+                <div className="field">
                   <label>Reference docs (optional)</label>
                   <input
                     type="file"
@@ -1420,6 +1449,28 @@ export default function Dashboard() {
                     elapsed {formatDuration(elapsedSeconds)}
                   </div>
                 </div>
+
+                {pendingApproval && (
+                  <div className="error-banner" style={{ borderLeftColor: 'var(--gold)', color: 'var(--text)' }}>
+                    <strong>Approval needed:</strong> {pendingApproval.message}
+                    <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                      <button
+                        className="btn btn-primary"
+                        onClick={() => sendPipelineControl('approve')}
+                        disabled={controlBusy}
+                      >
+                        Approve (~${pendingApproval.estimatedCostUSD.toFixed(2)})
+                      </button>
+                      <button
+                        className="btn btn-ghost"
+                        onClick={() => sendPipelineControl('deny')}
+                        disabled={controlBusy}
+                      >
+                        No, keep it on Groq
+                      </button>
+                    </div>
+                  </div>
+                )}
 
                 <div className="steps">
                   {STEP_GROUPS.map((group, i) => {

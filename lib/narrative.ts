@@ -5,6 +5,7 @@ import { Transcript, NarrativeResult, NarrativeSection } from './types';
 import { transcriptToPromptText, formatTimestamp } from './whisper';
 import { formatReferenceBlock } from './reference-material';
 import { estimateTokens, splitTranscriptIntoChunks } from './chunking';
+import { estimateCostUSD } from './anthropic-usage';
 
 const NARRATIVE_TOOL_NAME = 'submit_narrative';
 
@@ -125,6 +126,16 @@ export interface NarrativeOptions {
   signal?: AbortSignal;
   /** Called once, only if this transcript is long enough to need splitting into multiple requests -- lets the caller surface a plain-language heads-up to the user before it happens. */
   onNotice?: (message: string) => void;
+  /** Per-run provider choice from the UI; overrides config.llmProvider when set. */
+  llmProviderMode?: 'groq' | 'anthropic' | 'auto';
+  /**
+   * Only used in 'auto' mode, only when the transcript is too large for
+   * Groq's free-tier limits and Anthropic is configured: asks the user to
+   * approve the estimated cost before spending anything. Resolves
+   * 'approve' or 'deny'; if omitted (or the user denies), falls back to
+   * Groq's free chunked path instead of ever calling Anthropic silently.
+   */
+  requestApproval?: (estimatedCostUSD: number) => Promise<'approve' | 'deny'>;
 }
 
 // Groq's free tier hard-caps at 12,000 tokens/minute (prompt + completion,
@@ -172,7 +183,8 @@ function buildContextBlocks(options: NarrativeOptions) {
 async function generateNarrativeSinglePass(
   transcript: Transcript,
   sourceFileName: string,
-  options: NarrativeOptions
+  options: NarrativeOptions,
+  provider: 'groq' | 'anthropic'
 ): Promise<NarrativeResult> {
   const transcriptText = transcriptToPromptText(transcript);
   const totalDuration = formatTimestamp(transcript.durationSec);
@@ -202,6 +214,7 @@ Build a structured long-form narrative for this footage for the ABH editorial an
       groqModel: config.groqNarrativeModel,
       maxTokens: SINGLE_PASS_COMPLETION_TOKENS,
       signal: options.signal,
+      provider,
     }
   )) as Omit<NarrativeResult, 'title' | 'titleOptions'> & { titleOptions?: unknown };
 
@@ -256,6 +269,10 @@ Build narrative sections/beats covering ONLY this part of the footage, in the AB
       groqModel: config.groqNarrativeModel,
       maxTokens: CHUNK_COMPLETION_TOKENS,
       signal: options.signal,
+      // Chunking exists specifically to work around Groq's tight free-tier
+      // limits -- Anthropic's real limits are far above anything this
+      // app's transcripts hit, so it never needs this path.
+      provider: 'groq',
     }
   )) as { sections?: NarrativeSection[] };
 
@@ -296,6 +313,7 @@ Based on this outline, propose title options, a one-sentence logline, 2-5 theme 
       groqModel: config.groqNarrativeModel,
       maxTokens: 1500,
       signal: options.signal,
+      provider: 'groq',
     }
   )) as Omit<NarrativeResult, 'title' | 'titleOptions' | 'sections'> & { titleOptions?: unknown };
 
@@ -336,21 +354,51 @@ export async function generateNarrative(
   sourceFileName: string,
   options: NarrativeOptions = {}
 ): Promise<NarrativeResult> {
-  // Only Groq has a rate limit tight enough for this app's transcripts to
+  const mode = options.llmProviderMode ?? config.llmProvider;
+
+  // Explicit "Anthropic only": no size check needed at all -- its real
+  // limits are far above anything this app's transcripts hit.
+  if (mode === 'anthropic') {
+    return generateNarrativeSinglePass(transcript, sourceFileName, options, 'anthropic');
+  }
+
+  // Groq's rate limit is tight enough for this app's transcripts to
   // realistically hit -- estimate this the same rough way the ceiling
   // itself is denominated (prompt + completion tokens together) before
   // ever making a request, rather than waiting to fail and retry.
-  if (config.llmProvider === 'groq') {
-    const transcriptText = transcriptToPromptText(transcript);
-    const { briefBlock, targetLengthBlock, titleHintBlock, referenceBlock } = buildContextBlocks(options);
-    const estimatedPromptTokens =
-      estimateTokens(
-        transcriptText + briefBlock + targetLengthBlock + titleHintBlock + referenceBlock + ABH_BRAND_VOICE_SYSTEM_PROMPT
-      ) + TOOL_SCHEMA_TOKEN_OVERHEAD;
-    if (estimatedPromptTokens + SINGLE_PASS_COMPLETION_TOKENS > GROQ_SAFE_TOTAL_TOKEN_BUDGET) {
-      return chunkedGenerateNarrative(transcript, sourceFileName, options);
+  const transcriptText = transcriptToPromptText(transcript);
+  const { briefBlock, targetLengthBlock, titleHintBlock, referenceBlock } = buildContextBlocks(options);
+  const estimatedPromptTokens =
+    estimateTokens(
+      transcriptText + briefBlock + targetLengthBlock + titleHintBlock + referenceBlock + ABH_BRAND_VOICE_SYSTEM_PROMPT
+    ) + TOOL_SCHEMA_TOKEN_OVERHEAD;
+  const fitsGroq = estimatedPromptTokens + SINGLE_PASS_COMPLETION_TOKENS <= GROQ_SAFE_TOTAL_TOKEN_BUDGET;
+
+  if (fitsGroq) {
+    return generateNarrativeSinglePass(transcript, sourceFileName, options, 'groq');
+  }
+
+  // Doesn't fit Groq's free-tier limit in one request. Explicit "Groq
+  // only" means chunk-and-merge on Groq no matter what, same as always.
+  if (mode === 'groq') {
+    return chunkedGenerateNarrative(transcript, sourceFileName, options);
+  }
+
+  // mode === 'auto': offer Anthropic instead of chunking, but only ever
+  // with the user's actual approval of the real estimated cost -- never
+  // spend anything silently. Falls back to Groq's free chunked path if
+  // Anthropic isn't configured, or the user declines.
+  if (config.hasAnthropicKey && options.requestApproval) {
+    const estimatedCostUSD = estimateCostUSD(
+      config.anthropicNarrativeModel,
+      estimatedPromptTokens,
+      SINGLE_PASS_COMPLETION_TOKENS
+    );
+    const decision = await options.requestApproval(estimatedCostUSD);
+    if (decision === 'approve') {
+      return generateNarrativeSinglePass(transcript, sourceFileName, options, 'anthropic');
     }
   }
 
-  return generateNarrativeSinglePass(transcript, sourceFileName, options);
+  return chunkedGenerateNarrative(transcript, sourceFileName, options);
 }

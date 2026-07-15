@@ -21,6 +21,7 @@ interface JobState {
   paused: boolean;
   controller: AbortController;
   resumeWaiters: Array<() => void>;
+  approvalWaiters: Array<(decision: 'approve' | 'deny') => void>;
 }
 
 // Attached to globalThis rather than a plain module-level variable.
@@ -37,7 +38,12 @@ const globalForJobs = globalThis as unknown as { __abhJobs?: Map<string, JobStat
 const jobs = globalForJobs.__abhJobs ?? (globalForJobs.__abhJobs = new Map<string, JobState>());
 
 export function createJob(jobId: string): JobState {
-  const state: JobState = { paused: false, controller: new AbortController(), resumeWaiters: [] };
+  const state: JobState = {
+    paused: false,
+    controller: new AbortController(),
+    resumeWaiters: [],
+    approvalWaiters: [],
+  };
   jobs.set(jobId, state);
   return state;
 }
@@ -75,6 +81,37 @@ export function stopJob(jobId: string): boolean {
   // and throw promptly instead of waiting for a resume that isn't coming.
   const waiters = job.resumeWaiters.splice(0);
   waiters.forEach((resolve) => resolve());
+  // Same for a pending Anthropic cost-approval prompt: resolve it as
+  // 'deny' (the free-fallback path) so a Stop click doesn't leave the
+  // pipeline hanging on a decision that's now moot.
+  const approvalWaiters = job.approvalWaiters.splice(0);
+  approvalWaiters.forEach((resolve) => resolve('deny'));
+  return true;
+}
+
+/**
+ * Blocks until the client responds to an Anthropic cost-approval prompt
+ * (see resolveApproval), or the job is stopped (resolves as 'deny', the
+ * free-fallback path) or isn't tracked at all (also 'deny' -- safer
+ * default than silently spending money with nobody able to approve it).
+ */
+export function waitForApproval(jobId: string): Promise<'approve' | 'deny'> {
+  return new Promise((resolve) => {
+    const job = jobs.get(jobId);
+    if (!job || job.controller.signal.aborted) {
+      resolve('deny');
+      return;
+    }
+    job.approvalWaiters.push(resolve);
+  });
+}
+
+/** Returns false if the job isn't currently tracked (e.g. already finished). */
+export function resolveApproval(jobId: string, decision: 'approve' | 'deny'): boolean {
+  const job = jobs.get(jobId);
+  if (!job) return false;
+  const waiters = job.approvalWaiters.splice(0);
+  waiters.forEach((resolve) => resolve(decision));
   return true;
 }
 

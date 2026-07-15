@@ -40,11 +40,15 @@ export const config = {
   // Narrative generation + short-form flagging both go through lib/llm.ts,
   // which picks a provider based on this switch. Defaults to Groq (free
   // tier, no billing required) so the whole pipeline can be exercised at
-  // zero cost; set LLM_PROVIDER=anthropic (and ANTHROPIC_API_KEY) later to
-  // switch to Claude for production-quality output. No code changes needed
-  // to move between them.
-  get llmProvider(): 'groq' | 'anthropic' {
-    return process.env.LLM_PROVIDER === 'anthropic' ? 'anthropic' : 'groq';
+  // zero cost. 'auto' tries Groq first and only offers to switch to
+  // Anthropic (with a cost-approval prompt, see lib/narrative.ts /
+  // lib/shortform.ts) when a video is too large for Groq's free-tier
+  // limits. This is only the default; the UI sends a per-run choice
+  // (Groq only / Anthropic only / Auto) that overrides it per run.
+  get llmProvider(): 'groq' | 'anthropic' | 'auto' {
+    const raw = process.env.LLM_PROVIDER;
+    if (raw === 'anthropic' || raw === 'auto') return raw;
+    return 'groq';
   },
   get groqNarrativeModel() {
     return process.env.GROQ_NARRATIVE_MODEL || 'llama-3.3-70b-versatile';
@@ -52,15 +56,33 @@ export const config = {
   get groqShortFormModel() {
     return process.env.GROQ_SHORTFORM_MODEL || 'llama-3.3-70b-versatile';
   },
-  // Only required when LLM_PROVIDER=anthropic.
+  // Only required when actually making an Anthropic call (explicit
+  // LLM_PROVIDER=anthropic, or an approved Auto-mode switch).
   get anthropicApiKey() {
     return required('ANTHROPIC_API_KEY');
+  },
+  // Non-throwing presence check, for deciding whether Anthropic is even an
+  // option to offer (e.g. in Auto mode) without forcing it to be configured
+  // the way anthropicApiKey above does for routes that actually need it.
+  get hasAnthropicKey(): boolean {
+    return !!process.env.ANTHROPIC_API_KEY;
   },
   get anthropicNarrativeModel() {
     return process.env.ANTHROPIC_NARRATIVE_MODEL || 'claude-opus-4-8';
   },
   get anthropicShortFormModel() {
     return process.env.ANTHROPIC_SHORTFORM_MODEL || 'claude-sonnet-4-6';
+  },
+  // Hard daily ceiling on real Anthropic spend (in USD), enforced right
+  // before every Anthropic call regardless of how that call was reached
+  // (explicit per-run choice, or an approved Auto-mode switch) -- the
+  // actual safety net against a runaway bill when other people are also
+  // testing the app. Default is deliberately conservative; raise it in
+  // your environment if you want more daily headroom.
+  get anthropicDailySpendCapUSD(): number {
+    const raw = process.env.ANTHROPIC_DAILY_SPEND_CAP_USD;
+    const parsed = raw ? Number(raw) : NaN;
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 5;
   },
   get sessionSecret() {
     return required('SESSION_SECRET');
