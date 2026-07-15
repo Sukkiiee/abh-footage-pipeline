@@ -102,7 +102,20 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Invalid JSON body.' }, { status: 400 });
   }
 
+  // Registered as early as possible -- immediately once we have a jobId,
+  // before any of the slower async work below (Drive auth in particular can
+  // take a real fraction of a second). The client shows the Pause/Cancel
+  // controls the instant it sends this request, so if job registration
+  // happened any later than this, clicking either during that window would
+  // hit a job the server hasn't recorded yet and get a false "that run is
+  // no longer active" error -- confirmed happening in practice. Every early
+  // return below now cleans this up on its way out so a request that never
+  // reaches the actual pipeline doesn't leave a phantom entry behind.
+  if (jobId) createJob(jobId);
+  const signal = jobId ? getJobSignal(jobId) : undefined;
+
   if (!fileId && !localSourcePath) {
+    if (jobId) removeJob(jobId);
     return NextResponse.json(
       { error: 'Provide a fileId, a Drive video link, or a local file path.' },
       { status: 400 }
@@ -110,6 +123,7 @@ export async function POST(req: NextRequest) {
   }
 
   if (localSourcePath && !config.localFootageEnabled) {
+    if (jobId) removeJob(jobId);
     return NextResponse.json(
       {
         error:
@@ -132,6 +146,7 @@ export async function POST(req: NextRequest) {
     try {
       authCtx = await requireDrive(req);
     } catch (err) {
+      if (jobId) removeJob(jobId);
       const status = err instanceof NotConnectedError ? 401 : 500;
       return NextResponse.json(
         { error: err instanceof Error ? err.message : 'Authorization error.' },
@@ -148,11 +163,6 @@ export async function POST(req: NextRequest) {
   // mid-pipeline (very unlikely inside a token's ~1hr lifetime) won't be
   // persisted, but the proactive refresh that already happened will be.
   const refreshedTokens = finalizeTokens ? finalizeTokens() : null;
-
-  // Only tracked (pausable/stoppable) if the client sent a jobId; older or
-  // ad-hoc callers without one just run straight through, uninterruptible.
-  if (jobId) createJob(jobId);
-  const signal = jobId ? getJobSignal(jobId) : undefined;
 
   const stream = createSseStream(async (sse) => {
     const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'abh-'));
