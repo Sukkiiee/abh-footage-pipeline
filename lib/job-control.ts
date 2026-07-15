@@ -23,7 +23,18 @@ interface JobState {
   resumeWaiters: Array<() => void>;
 }
 
-const jobs = new Map<string, JobState>();
+// Attached to globalThis rather than a plain module-level variable.
+// Confirmed in practice: Next.js's dev server can compile each API route
+// into its own isolated module bundle, so a plain `const jobs = new Map()`
+// here was NOT guaranteed to be the same object between the route that
+// creates a job (app/api/pipeline/run) and the route that controls it
+// (app/api/pipeline/control) -- every pause/cancel request failed with
+// "that run is no longer active" because it was looking at an empty Map
+// of its own, not the one the run route had actually populated. globalThis
+// is the one thing genuinely shared across however many times the dev
+// bundler re-evaluates this module.
+const globalForJobs = globalThis as unknown as { __abhJobs?: Map<string, JobState> };
+const jobs = globalForJobs.__abhJobs ?? (globalForJobs.__abhJobs = new Map<string, JobState>());
 
 export function createJob(jobId: string): JobState {
   const state: JobState = { paused: false, controller: new AbortController(), resumeWaiters: [] };
