@@ -104,7 +104,7 @@ Anthropic; a long video that needs splitting is more like $0.25-$0.45.
 **Spend caps, dev override, and a spend log.** Two hard caps are enforced
 before every single Anthropic call, no matter how it was reached --
 `ANTHROPIC_DAILY_SPEND_CAP_USD` (default $5) and
-`ANTHROPIC_MONTHLY_SPEND_CAP_USD` (default $10). Whichever is hit first
+`ANTHROPIC_MONTHLY_SPEND_CAP_USD` (default $5). Whichever is hit first
 blocks further Anthropic use (falls back to Groq) for everyone -- except
 whoever has `ANTHROPIC_ADMIN_CODE`, a secret only you as the dev should
 know. Once a cap is hit, the approval prompt in the UI shows a field for

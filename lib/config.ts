@@ -87,7 +87,7 @@ export const config = {
   get anthropicMonthlySpendCapUSD(): number {
     const raw = process.env.ANTHROPIC_MONTHLY_SPEND_CAP_USD;
     const parsed = raw ? Number(raw) : NaN;
-    return Number.isFinite(parsed) && parsed > 0 ? parsed : 10;
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 5;
   },
   // A secret only the dev is meant to know. Required to use Anthropic once
   // a spend cap is hit, or whenever anthropicEnabledForOthers is false --
