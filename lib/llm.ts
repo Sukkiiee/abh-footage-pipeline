@@ -1,7 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
 import { config } from './config';
-import { getTodaySpendUSD, recordSpendUSD, estimateCostUSD } from './anthropic-usage';
+import { getTodaySpendUSD, getThisMonthSpendUSD, recordSpendUSD, estimateCostUSD, logSpendEvent } from './anthropic-usage';
 
 // Provider-agnostic "force a structured JSON tool call" helper. narrative.ts
 // and shortform.ts both call this instead of talking to Anthropic or Groq
@@ -27,6 +27,20 @@ export interface GenerateStructuredOptions {
    * function only ever sees a real choice, never has to guess.
    */
   provider: 'groq' | 'anthropic';
+  /** Only relevant for provider: 'anthropic'. Bypasses the spend cap / enabledForOthers gate if it matches config.anthropicAdminCode. */
+  adminOverrideCode?: string;
+  /** Only relevant for provider: 'anthropic'. Who to attribute this spend to in the log -- an email, a machine identifier, or 'unknown' if neither was available. */
+  spendIdentifier?: string;
+  /** Only relevant for provider: 'anthropic'. Short label (e.g. the source filename) recorded alongside the spend log entry, purely for readability. */
+  spendContext?: string;
+}
+
+/** Thrown specifically when Anthropic use is blocked by a spend cap or the enabledForOthers toggle, with no valid admin override -- a distinct type so callers (see lib/narrative.ts / lib/shortform.ts's Auto mode) can catch exactly this and fall back to Groq gracefully, rather than failing the whole run over what's an expected, handleable condition. */
+export class AnthropicSpendBlockedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AnthropicSpendBlockedError';
+  }
 }
 
 export async function generateStructuredJSON(
@@ -38,7 +52,17 @@ export async function generateStructuredJSON(
   const maxTokens = opts.maxTokens ?? 8000;
 
   if (opts.provider === 'anthropic') {
-    return generateViaAnthropic(systemPrompt, userPrompt, tool, opts.anthropicModel, maxTokens, opts.signal);
+    return generateViaAnthropic(
+      systemPrompt,
+      userPrompt,
+      tool,
+      opts.anthropicModel,
+      maxTokens,
+      opts.signal,
+      opts.adminOverrideCode,
+      opts.spendIdentifier,
+      opts.spendContext
+    );
   }
   return generateViaGroq(systemPrompt, userPrompt, tool, opts.groqModel, maxTokens, opts.signal);
 }
@@ -49,7 +73,10 @@ async function generateViaAnthropic(
   tool: StructuredToolSpec,
   model: string,
   maxTokens: number,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  adminOverrideCode?: string,
+  spendIdentifier?: string,
+  spendContext?: string
 ): Promise<unknown> {
   // The actual real-money safety net: enforced right before every single
   // Anthropic call, regardless of how that call was reached (an explicit
@@ -58,12 +85,32 @@ async function generateViaAnthropic(
   // several people are testing it at once. Checked against spend already
   // recorded from completed calls, not a pre-estimate, so this can't
   // itself block a request based on a guess; it can only stop *further*
-  // calls once real spend has actually reached the cap.
-  const spentToday = getTodaySpendUSD();
-  if (spentToday >= config.anthropicDailySpendCapUSD) {
-    throw new Error(
-      `Daily Anthropic spend cap of $${config.anthropicDailySpendCapUSD.toFixed(2)} reached (used $${spentToday.toFixed(2)} today). Wait until tomorrow, raise ANTHROPIC_DAILY_SPEND_CAP_USD in your environment, or use Groq instead.`
-    );
+  // calls once real spend has actually reached a cap.
+  //
+  // A valid admin override code bypasses all of this -- "only the dev can
+  // approve anything higher" is enforced entirely by that code being a
+  // secret only the dev knows (config.anthropicAdminCode), not by any
+  // notion of user accounts, which this app doesn't have.
+  const isAdmin = !!config.anthropicAdminCode && adminOverrideCode === config.anthropicAdminCode;
+
+  if (!isAdmin) {
+    if (!config.anthropicEnabledForOthers) {
+      throw new AnthropicSpendBlockedError(
+        'Anthropic is currently turned off for everyone except the dev (ANTHROPIC_ENABLED_FOR_OTHERS=false). Ask the dev for the admin override code, or continue on Groq instead.'
+      );
+    }
+    const spentToday = getTodaySpendUSD();
+    if (spentToday >= config.anthropicDailySpendCapUSD) {
+      throw new AnthropicSpendBlockedError(
+        `Daily Anthropic spend cap of $${config.anthropicDailySpendCapUSD.toFixed(2)} reached (used $${spentToday.toFixed(2)} today). Ask the dev for the admin override code, wait until tomorrow, or continue on Groq instead.`
+      );
+    }
+    const spentThisMonth = getThisMonthSpendUSD();
+    if (spentThisMonth >= config.anthropicMonthlySpendCapUSD) {
+      throw new AnthropicSpendBlockedError(
+        `Monthly Anthropic spend cap of $${config.anthropicMonthlySpendCapUSD.toFixed(2)} reached (used $${spentThisMonth.toFixed(2)} this month). Ask the dev for the admin override code, wait until next month, or continue on Groq instead.`
+      );
+    }
   }
 
   const client = new Anthropic({ apiKey: config.anthropicApiKey });
@@ -88,7 +135,16 @@ async function generateViaAnthropic(
   );
 
   if (response.usage) {
-    recordSpendUSD(estimateCostUSD(model, response.usage.input_tokens, response.usage.output_tokens));
+    const cost = estimateCostUSD(model, response.usage.input_tokens, response.usage.output_tokens);
+    recordSpendUSD(cost);
+    logSpendEvent({
+      identifier: spendIdentifier || 'unknown',
+      model,
+      inputTokens: response.usage.input_tokens,
+      outputTokens: response.usage.output_tokens,
+      costUSD: cost,
+      context: spendContext,
+    });
   }
 
   const toolUse = response.content.find((block) => block.type === 'tool_use') as

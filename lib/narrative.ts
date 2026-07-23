@@ -1,11 +1,12 @@
 import { config } from './config';
-import { generateStructuredJSON } from './llm';
+import { generateStructuredJSON, AnthropicSpendBlockedError } from './llm';
 import { ABH_BRAND_VOICE_SYSTEM_PROMPT } from './brand-voice';
 import { Transcript, NarrativeResult, NarrativeSection } from './types';
 import { transcriptToPromptText, formatTimestamp } from './whisper';
 import { formatReferenceBlock } from './reference-material';
 import { estimateTokens, splitTranscriptIntoChunks } from './chunking';
-import { estimateCostUSD } from './anthropic-usage';
+import { estimateCostUSD, getTodaySpendUSD, getThisMonthSpendUSD } from './anthropic-usage';
+import { ApprovalResult } from './job-control';
 
 const NARRATIVE_TOOL_NAME = 'submit_narrative';
 
@@ -131,11 +132,32 @@ export interface NarrativeOptions {
   /**
    * Only used in 'auto' mode, only when the transcript is too large for
    * Groq's free-tier limits and Anthropic is configured: asks the user to
-   * approve the estimated cost before spending anything. Resolves
-   * 'approve' or 'deny'; if omitted (or the user denies), falls back to
+   * approve the estimated cost before spending anything (or, if a spend
+   * cap is already exhausted, to provide the admin override code). If
+   * omitted, denied, or blocked with no valid override, falls back to
    * Groq's free chunked path instead of ever calling Anthropic silently.
    */
-  requestApproval?: (estimatedCostUSD: number) => Promise<'approve' | 'deny'>;
+  requestApproval?: (estimatedCostUSD: number, capBlockedReason?: string) => Promise<ApprovalResult>;
+  /** Who to attribute any Anthropic spend to in the spend log -- an email, a machine identifier, or omitted. */
+  spendIdentifier?: string;
+  /** Short label (e.g. the source filename) recorded alongside any Anthropic spend log entry, purely for readability. */
+  spendContext?: string;
+}
+
+/** Null if neither cap is currently exhausted; otherwise a human-readable reason, for the approval prompt / any error message. */
+function capBlockedReason(): string | undefined {
+  if (!config.anthropicEnabledForOthers) {
+    return 'Anthropic is currently turned off for everyone except the dev.';
+  }
+  const spentToday = getTodaySpendUSD();
+  if (spentToday >= config.anthropicDailySpendCapUSD) {
+    return `Daily Anthropic spend cap of $${config.anthropicDailySpendCapUSD.toFixed(2)} reached (used $${spentToday.toFixed(2)} today).`;
+  }
+  const spentThisMonth = getThisMonthSpendUSD();
+  if (spentThisMonth >= config.anthropicMonthlySpendCapUSD) {
+    return `Monthly Anthropic spend cap of $${config.anthropicMonthlySpendCapUSD.toFixed(2)} reached (used $${spentThisMonth.toFixed(2)} this month).`;
+  }
+  return undefined;
 }
 
 // Groq's free tier hard-caps at 12,000 tokens/minute (prompt + completion,
@@ -184,7 +206,8 @@ async function generateNarrativeSinglePass(
   transcript: Transcript,
   sourceFileName: string,
   options: NarrativeOptions,
-  provider: 'groq' | 'anthropic'
+  provider: 'groq' | 'anthropic',
+  adminOverrideCode?: string
 ): Promise<NarrativeResult> {
   const transcriptText = transcriptToPromptText(transcript);
   const totalDuration = formatTimestamp(transcript.durationSec);
@@ -215,6 +238,9 @@ Build a structured long-form narrative for this footage for the ABH editorial an
       maxTokens: SINGLE_PASS_COMPLETION_TOKENS,
       signal: options.signal,
       provider,
+      adminOverrideCode,
+      spendIdentifier: options.spendIdentifier,
+      spendContext: sourceFileName,
     }
   )) as Omit<NarrativeResult, 'title' | 'titleOptions'> & { titleOptions?: unknown };
 
@@ -386,17 +412,29 @@ export async function generateNarrative(
 
   // mode === 'auto': offer Anthropic instead of chunking, but only ever
   // with the user's actual approval of the real estimated cost -- never
-  // spend anything silently. Falls back to Groq's free chunked path if
-  // Anthropic isn't configured, or the user declines.
+  // spend anything silently. If a spend cap (or the enabledForOthers
+  // toggle) is already blocking Anthropic, the approval prompt reflects
+  // that and asks for the admin override code instead of a plain yes/no.
+  // Falls back to Groq's free chunked path if Anthropic isn't configured,
+  // the user declines, or the attempt is still blocked even with whatever
+  // code was provided (wrong code, or blocked for another reason).
   if (config.hasAnthropicKey && options.requestApproval) {
     const estimatedCostUSD = estimateCostUSD(
       config.anthropicNarrativeModel,
       estimatedPromptTokens,
       SINGLE_PASS_COMPLETION_TOKENS
     );
-    const decision = await options.requestApproval(estimatedCostUSD);
+    const { decision, adminCode } = await options.requestApproval(estimatedCostUSD, capBlockedReason());
     if (decision === 'approve') {
-      return generateNarrativeSinglePass(transcript, sourceFileName, options, 'anthropic');
+      try {
+        return await generateNarrativeSinglePass(transcript, sourceFileName, options, 'anthropic', adminCode);
+      } catch (err) {
+        if (err instanceof AnthropicSpendBlockedError) {
+          options.onNotice?.(`${err.message} Continuing on Groq's free tier instead.`);
+        } else {
+          throw err;
+        }
+      }
     }
   }
 

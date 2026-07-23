@@ -10,3 +10,4 @@ node_modules
 .claude/scheduled_tasks.lock
 .cache/
 .anthropic-usage.json
+.anthropic-spend-log.csv

@@ -289,6 +289,22 @@ export async function listVideoFilesRecursive(
   return { files, truncated };
 }
 
+/**
+ * The connected Drive account's own email, used purely as a human-readable
+ * identifier for the Anthropic spend log (see lib/anthropic-usage.ts) --
+ * not used for anything access-control related. Returns undefined on any
+ * failure (e.g. an unusual token scope) rather than ever blocking a real
+ * pipeline run over a logging nicety.
+ */
+export async function getConnectedAccountEmail(drive: drive_v3.Drive): Promise<string | undefined> {
+  try {
+    const res = await drive.about.get({ fields: 'user' });
+    return res.data.user?.emailAddress || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function getFileMetadata(
   drive: drive_v3.Drive,
   fileId: string

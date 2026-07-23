@@ -10,6 +10,7 @@ import {
   extractFileId,
   VIDEO_MIME_TYPES,
   NotConnectedError,
+  getConnectedAccountEmail,
 } from '@/lib/google-drive';
 import { VideoSource, probeVideo, extractAudio, chunkAudioIfNeeded } from '@/lib/media';
 import { transcribeChunks, formatTimestamp } from '@/lib/whisper';
@@ -181,14 +182,23 @@ export async function POST(req: NextRequest) {
     // extractShortFormClips fall back to Groq's free chunked path whenever
     // this is undefined, never spending anything without it.
     const requestApproval = jobId
-      ? async (estimatedCostUSD: number) => {
+      ? async (estimatedCostUSD: number, blockedReason?: string) => {
           sse.send('approval-required', {
             estimatedCostUSD,
-            message: `This video is large enough that Groq's free tier can't process it in one go. Switching to Anthropic for this step would cost approximately $${estimatedCostUSD.toFixed(2)}.`,
+            capBlockedReason: blockedReason,
+            message: blockedReason
+              ? `${blockedReason} An admin override code is needed to use Anthropic anyway.`
+              : `This video is large enough that Groq's free tier can't process it in one go. Switching to Anthropic for this step would cost approximately $${estimatedCostUSD.toFixed(2)}.`,
           });
           return waitForApproval(jobId!);
         }
       : undefined;
+
+    // The connected Drive account's email when available (purely for the
+    // Anthropic spend log's "who spent this" column -- see
+    // lib/anthropic-usage.ts), falling back to a per-machine identifier
+    // for local-footage runs with no Drive connection at all.
+    const spendIdentifier = drive ? (await getConnectedAccountEmail(drive)) || os.hostname() : os.hostname();
 
     try {
       let sourceFileName: string;
@@ -319,6 +329,7 @@ export async function POST(req: NextRequest) {
         signal,
         llmProviderMode,
         requestApproval,
+        spendIdentifier,
         onNotice: (message) => sse.send('progress', { stage: 'narrative', message, percent: 60 }),
       });
 
@@ -337,6 +348,7 @@ export async function POST(req: NextRequest) {
         signal,
         llmProviderMode,
         requestApproval,
+        spendIdentifier,
         onNotice: (message) => sse.send('progress', { stage: 'shortform', message, percent: 75 }),
       });
 

@@ -73,16 +73,37 @@ export const config = {
   get anthropicShortFormModel() {
     return process.env.ANTHROPIC_SHORTFORM_MODEL || 'claude-sonnet-4-6';
   },
-  // Hard daily ceiling on real Anthropic spend (in USD), enforced right
-  // before every Anthropic call regardless of how that call was reached
-  // (explicit per-run choice, or an approved Auto-mode switch) -- the
-  // actual safety net against a runaway bill when other people are also
-  // testing the app. Default is deliberately conservative; raise it in
-  // your environment if you want more daily headroom.
+  // Hard daily/monthly ceilings on real Anthropic spend (in USD), enforced
+  // right before every Anthropic call regardless of how that call was
+  // reached (explicit per-run choice, or an approved Auto-mode switch) --
+  // the actual safety net against a runaway bill when other people are
+  // also testing the app. Whichever cap is hit first blocks further spend
+  // until ANTHROPIC_ADMIN_CODE is provided (see anthropicAdminCode below).
   get anthropicDailySpendCapUSD(): number {
     const raw = process.env.ANTHROPIC_DAILY_SPEND_CAP_USD;
     const parsed = raw ? Number(raw) : NaN;
     return Number.isFinite(parsed) && parsed > 0 ? parsed : 5;
+  },
+  get anthropicMonthlySpendCapUSD(): number {
+    const raw = process.env.ANTHROPIC_MONTHLY_SPEND_CAP_USD;
+    const parsed = raw ? Number(raw) : NaN;
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 10;
+  },
+  // A secret only the dev is meant to know. Required to use Anthropic once
+  // a spend cap is hit, or whenever anthropicEnabledForOthers is false --
+  // without it, every path (explicit "Anthropic only" choice or an
+  // approved Auto-mode switch) falls back to Groq instead. Unset means no
+  // override is possible at all -- caps become hard blocks for everyone,
+  // including the dev, until raised in the environment directly.
+  get anthropicAdminCode(): string | undefined {
+    return process.env.ANTHROPIC_ADMIN_CODE || undefined;
+  },
+  // Master on/off switch for Anthropic access for everyone except whoever
+  // has ANTHROPIC_ADMIN_CODE. Defaults to enabled (subject to the spend
+  // caps above); set to 'false' to shut off Anthropic for everyone but the
+  // dev, e.g. during a period of heavy testing by other people.
+  get anthropicEnabledForOthers(): boolean {
+    return process.env.ANTHROPIC_ENABLED_FOR_OTHERS !== 'false';
   },
   get sessionSecret() {
     return required('SESSION_SECRET');

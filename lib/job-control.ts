@@ -17,11 +17,17 @@ export class PipelineAbortedError extends Error {
   }
 }
 
+export interface ApprovalResult {
+  decision: 'approve' | 'deny';
+  /** Optional admin override code the client sent alongside the decision -- see lib/config.ts's anthropicAdminCode and lib/llm.ts's spend-cap gate. */
+  adminCode?: string;
+}
+
 interface JobState {
   paused: boolean;
   controller: AbortController;
   resumeWaiters: Array<() => void>;
-  approvalWaiters: Array<(decision: 'approve' | 'deny') => void>;
+  approvalWaiters: Array<(result: ApprovalResult) => void>;
 }
 
 // Attached to globalThis rather than a plain module-level variable.
@@ -85,7 +91,7 @@ export function stopJob(jobId: string): boolean {
   // 'deny' (the free-fallback path) so a Stop click doesn't leave the
   // pipeline hanging on a decision that's now moot.
   const approvalWaiters = job.approvalWaiters.splice(0);
-  approvalWaiters.forEach((resolve) => resolve('deny'));
+  approvalWaiters.forEach((resolve) => resolve({ decision: 'deny' }));
   return true;
 }
 
@@ -95,11 +101,11 @@ export function stopJob(jobId: string): boolean {
  * free-fallback path) or isn't tracked at all (also 'deny' -- safer
  * default than silently spending money with nobody able to approve it).
  */
-export function waitForApproval(jobId: string): Promise<'approve' | 'deny'> {
+export function waitForApproval(jobId: string): Promise<ApprovalResult> {
   return new Promise((resolve) => {
     const job = jobs.get(jobId);
     if (!job || job.controller.signal.aborted) {
-      resolve('deny');
+      resolve({ decision: 'deny' });
       return;
     }
     job.approvalWaiters.push(resolve);
@@ -107,11 +113,11 @@ export function waitForApproval(jobId: string): Promise<'approve' | 'deny'> {
 }
 
 /** Returns false if the job isn't currently tracked (e.g. already finished). */
-export function resolveApproval(jobId: string, decision: 'approve' | 'deny'): boolean {
+export function resolveApproval(jobId: string, decision: 'approve' | 'deny', adminCode?: string): boolean {
   const job = jobs.get(jobId);
   if (!job) return false;
   const waiters = job.approvalWaiters.splice(0);
-  waiters.forEach((resolve) => resolve(decision));
+  waiters.forEach((resolve) => resolve({ decision, adminCode }));
   return true;
 }
 

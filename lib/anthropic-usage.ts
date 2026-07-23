@@ -3,19 +3,22 @@ import path from 'path';
 
 // A hard, real-money safety net: tracks actual Anthropic spend (computed
 // from each call's real token usage, not an estimate) in a small local
-// JSON file, reset daily, so a shared/hosted instance can't run up an
-// unbounded bill -- whether Anthropic got used via an explicit per-run
-// choice or an approved Auto-mode switch, every path funnels through
-// recordSpend/getTodaySpend before/after the actual API call.
+// JSON file, tracked both daily and monthly, so a shared/hosted instance
+// can't run up an unbounded bill -- whether Anthropic got used via an
+// explicit per-run choice or an approved Auto-mode switch, every path
+// funnels through recordSpend before/after the actual API call.
 //
-// Deliberately a flat file, not a database: this app has no database by
+// Deliberately flat files, not a database: this app has no database by
 // design (see README), and spend tracking doesn't need anything more
-// durable than "resets once a day, survives a restart."
+// durable than "resets on schedule, survives a restart."
 const USAGE_FILE = path.join(process.cwd(), '.anthropic-usage.json');
+const SPEND_LOG_FILE = path.join(process.cwd(), '.anthropic-spend-log.csv');
 
 interface UsageRecord {
-  date: string; // YYYY-MM-DD, local server date
-  spentUSD: number;
+  date: string; // YYYY-MM-DD
+  dailySpentUSD: number;
+  month: string; // YYYY-MM
+  monthlySpentUSD: number;
 }
 
 function todayKey(): string {
@@ -23,34 +26,93 @@ function todayKey(): string {
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 }
 
+function thisMonthKey(): string {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+}
+
 function readRecord(): UsageRecord {
+  const date = todayKey();
+  const month = thisMonthKey();
   try {
     const raw = fs.readFileSync(USAGE_FILE, 'utf8');
-    const parsed = JSON.parse(raw) as UsageRecord;
-    if (parsed.date === todayKey() && typeof parsed.spentUSD === 'number') {
-      return parsed;
-    }
+    const parsed = JSON.parse(raw) as Partial<UsageRecord>;
+    return {
+      date,
+      month,
+      dailySpentUSD: parsed.date === date && typeof parsed.dailySpentUSD === 'number' ? parsed.dailySpentUSD : 0,
+      monthlySpentUSD:
+        parsed.month === month && typeof parsed.monthlySpentUSD === 'number' ? parsed.monthlySpentUSD : 0,
+    };
   } catch {
-    // No file yet, or unreadable/corrupt -- start fresh below.
+    // No file yet, or unreadable/corrupt -- start fresh.
   }
-  return { date: todayKey(), spentUSD: 0 };
+  return { date, month, dailySpentUSD: 0, monthlySpentUSD: 0 };
 }
 
 export function getTodaySpendUSD(): number {
-  return readRecord().spentUSD;
+  return readRecord().dailySpentUSD;
+}
+
+export function getThisMonthSpendUSD(): number {
+  return readRecord().monthlySpentUSD;
 }
 
 export function recordSpendUSD(amount: number): void {
   if (!Number.isFinite(amount) || amount <= 0) return;
   const record = readRecord();
-  record.spentUSD += amount;
+  record.dailySpentUSD += amount;
+  record.monthlySpentUSD += amount;
   try {
     fs.writeFileSync(USAGE_FILE, JSON.stringify(record));
   } catch {
     // Best effort -- if this can't be written (read-only filesystem, etc),
     // the call itself still already happened and shouldn't be treated as
-    // failed just because logging it failed. Worst case, the cap is less
-    // precisely enforced until this starts working again.
+    // failed just because logging it failed. Worst case, the caps are
+    // less precisely enforced until this starts working again.
+  }
+}
+
+function csvEscape(value: string): string {
+  return /[",\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
+}
+
+/**
+ * Appends one line per Anthropic call to a local CSV -- a real, openable
+ * "doc" (Excel/Numbers/Sheets/plain text) recording who spent what, not
+ * just a running total. `identifier` is the connected Google account's
+ * email when available, otherwise a per-machine identifier (see
+ * lib/google-drive.ts's getConnectedAccountEmail and the run route's
+ * fallback to os.hostname()).
+ */
+export function logSpendEvent(entry: {
+  identifier: string;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  costUSD: number;
+  context?: string;
+}): void {
+  try {
+    const isNewFile = !fs.existsSync(SPEND_LOG_FILE);
+    if (isNewFile) {
+      fs.writeFileSync(SPEND_LOG_FILE, 'timestamp,identifier,model,input_tokens,output_tokens,cost_usd,context\n');
+    }
+    const row = [
+      new Date().toISOString(),
+      entry.identifier,
+      entry.model,
+      String(entry.inputTokens),
+      String(entry.outputTokens),
+      entry.costUSD.toFixed(4),
+      entry.context || '',
+    ]
+      .map(csvEscape)
+      .join(',');
+    fs.appendFileSync(SPEND_LOG_FILE, row + '\n');
+  } catch {
+    // Best effort, same reasoning as recordSpendUSD above -- never let
+    // logging failure block or fail an already-completed API call.
   }
 }
 

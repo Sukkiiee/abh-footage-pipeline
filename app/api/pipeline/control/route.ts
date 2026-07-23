@@ -14,11 +14,13 @@ type Action = (typeof ACTIONS)[number];
 export async function POST(req: NextRequest) {
   let jobId = '';
   let action = '';
+  let adminCode: string | undefined;
 
   try {
     const body = await req.json();
     jobId = String(body.jobId || '');
     action = String(body.action || '');
+    adminCode = body.adminCode ? String(body.adminCode) : undefined;
   } catch {
     return NextResponse.json({ error: 'Invalid JSON body.' }, { status: 400 });
   }
@@ -34,8 +36,8 @@ export async function POST(req: NextRequest) {
     pause: pauseJob,
     resume: resumeJob,
     stop: stopJob,
-    approve: (id: string) => resolveApproval(id, 'approve'),
-    deny: (id: string) => resolveApproval(id, 'deny'),
+    approve: (id: string) => resolveApproval(id, 'approve', adminCode),
+    deny: (id: string) => resolveApproval(id, 'deny', adminCode),
   };
   const ok = handlers[action as Action](jobId);
 

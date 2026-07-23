@@ -444,9 +444,12 @@ export default function Dashboard() {
   // (with a cost-approval prompt) when a video is too large for Groq's
   // free-tier limits -- see the 'approval-required' SSE handling below.
   const [llmProviderChoice, setLlmProviderChoice] = useState<'groq' | 'anthropic' | 'auto'>('auto');
-  const [pendingApproval, setPendingApproval] = useState<{ estimatedCostUSD: number; message: string } | null>(
-    null
-  );
+  const [pendingApproval, setPendingApproval] = useState<{
+    estimatedCostUSD: number;
+    message: string;
+    capBlockedReason?: string;
+  } | null>(null);
+  const [adminCodeInput, setAdminCodeInput] = useState('');
   const [driveLinkInput, setDriveLinkInput] = useState('');
   const [referenceDocs, setReferenceDocs] = useState<ReferenceDoc[]>([]);
   const [referenceUploadBusy, setReferenceUploadBusy] = useState(false);
@@ -695,6 +698,7 @@ export default function Dashboard() {
     setEstimatedTotalSeconds(target.sizeBytes ? estimateDurationSeconds(target.sizeBytes) : null);
     setLiveTranscriptLines([]);
     setPendingApproval(null);
+    setAdminCodeInput('');
     setView('processing');
 
     const jobId =
@@ -774,7 +778,9 @@ export default function Dashboard() {
               setLiveTranscriptLines(progressEvent.transcriptLines);
             }
           } else if (eventName === 'approval-required') {
-            setPendingApproval(data as { estimatedCostUSD: number; message: string });
+            setPendingApproval(
+              data as { estimatedCostUSD: number; message: string; capBlockedReason?: string }
+            );
           } else if (eventName === 'done') {
             receivedTerminalEvent = true;
             // completedAt/runtimeSec aren't sent by the server -- attached
@@ -824,17 +830,18 @@ export default function Dashboard() {
       setCurrentJobId(null);
       setPaused(false);
       setPendingApproval(null);
+      setAdminCodeInput('');
     }
   }
 
-  async function sendPipelineControl(action: 'pause' | 'resume' | 'stop' | 'approve' | 'deny') {
+  async function sendPipelineControl(action: 'pause' | 'resume' | 'stop' | 'approve' | 'deny', adminCode?: string) {
     if (!currentJobId) return;
     setControlBusy(true);
     try {
       const res = await fetch('/api/pipeline/control', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ jobId: currentJobId, action }),
+        body: JSON.stringify({ jobId: currentJobId, action, adminCode: adminCode || undefined }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -843,7 +850,10 @@ export default function Dashboard() {
       }
       if (action === 'pause') setPaused(true);
       if (action === 'resume') setPaused(false);
-      if (action === 'approve' || action === 'deny') setPendingApproval(null);
+      if (action === 'approve' || action === 'deny') {
+        setPendingApproval(null);
+        setAdminCodeInput('');
+      }
       // 'stop' leaves paused/runningFileId as-is; the running request will
       // surface a clean "Pipeline stopped by user." error event shortly,
       // which resets everything via runPipeline's own finally block.
@@ -1452,14 +1462,31 @@ export default function Dashboard() {
 
                 {pendingApproval && (
                   <div className="error-banner" style={{ borderLeftColor: 'var(--gold)', color: 'var(--text)' }}>
-                    <strong>Approval needed:</strong> {pendingApproval.message}
+                    <strong>{pendingApproval.capBlockedReason ? 'Anthropic unavailable:' : 'Approval needed:'}</strong>{' '}
+                    {pendingApproval.message}
+                    {pendingApproval.capBlockedReason && (
+                      <div style={{ marginTop: 10 }}>
+                        <span className="field-label" style={{ marginBottom: 4 }}>
+                          Admin override code (dev only)
+                        </span>
+                        <input
+                          type="password"
+                          placeholder="Leave blank to continue on Groq instead"
+                          value={adminCodeInput}
+                          onChange={(e) => setAdminCodeInput(e.target.value)}
+                          style={{ marginBottom: 0, maxWidth: 280 }}
+                        />
+                      </div>
+                    )}
                     <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
                       <button
                         className="btn btn-primary"
-                        onClick={() => sendPipelineControl('approve')}
+                        onClick={() => sendPipelineControl('approve', adminCodeInput)}
                         disabled={controlBusy}
                       >
-                        Approve (~${pendingApproval.estimatedCostUSD.toFixed(2)})
+                        {pendingApproval.capBlockedReason
+                          ? `Use Anthropic anyway (~$${pendingApproval.estimatedCostUSD.toFixed(2)})`
+                          : `Approve (~$${pendingApproval.estimatedCostUSD.toFixed(2)})`}
                       </button>
                       <button
                         className="btn btn-ghost"

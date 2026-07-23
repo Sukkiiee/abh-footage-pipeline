@@ -100,12 +100,26 @@ free) -- you're never charged without an explicit yes on that specific run.
 
 **Cost is real but small.** A typical run is roughly $0.10-$0.15 on
 Anthropic; a long video that needs splitting is more like $0.25-$0.45.
-There's also a hard daily spend cap (`ANTHROPIC_DAILY_SPEND_CAP_USD`,
-default $5) enforced before every single Anthropic call regardless of how
-it was reached -- the actual protection against a runaway bill if several
-people are testing the app at once. Tracked in a local `.anthropic-usage.json`
-file (gitignored, resets daily); raise the cap in your environment if you
-want more daily headroom.
+
+**Spend caps, dev override, and a spend log.** Two hard caps are enforced
+before every single Anthropic call, no matter how it was reached --
+`ANTHROPIC_DAILY_SPEND_CAP_USD` (default $5) and
+`ANTHROPIC_MONTHLY_SPEND_CAP_USD` (default $10). Whichever is hit first
+blocks further Anthropic use (falls back to Groq) for everyone -- except
+whoever has `ANTHROPIC_ADMIN_CODE`, a secret only you as the dev should
+know. Once a cap is hit, the approval prompt in the UI shows a field for
+this code instead of a plain yes/no; the correct code bypasses the cap for
+that call, anything else (or leaving it blank) falls back to Groq. The
+same code also works as a blanket override if you set
+`ANTHROPIC_ENABLED_FOR_OTHERS=false` -- a master switch to shut off
+Anthropic for everyone else, e.g. during a period of heavy testing.
+
+Every actual Anthropic call is also logged to a local `.anthropic-spend-log.csv`
+file (gitignored, real "who spent what" record, openable in Excel/Numbers/
+Sheets/a text editor) -- one row per call: timestamp, who it's attributed
+to (the connected Google account's email if Drive is connected, otherwise
+a per-machine identifier), model, token counts, cost, and which file it was
+for. Running totals live in `.anthropic-usage.json` (also gitignored).
 
 ## Stack
 
